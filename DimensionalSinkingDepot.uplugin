@@ -1,0 +1,33 @@
+{
+	"FileVersion": 3,
+	"Version": 0,
+	"VersionName": "0.1.0",
+	"SemVersion": "0.1.0",
+	"GameVersion": ">=517554",
+	"FriendlyName": "Dimensional Sinking Depot",
+	"Description": "A Dimensional Depot Uploader that sends overflow into the AWESOME Sink for points instead of backing up the belt. Unlocks with the Dimensional Depot research.",
+	"Category": "Modding",
+	"CreatedBy": "Zambie223",
+	"CreatedByURL": "https://github.com/Zambie223",
+	"DocsURL": "https://github.com/Zambie223/DimensionalSinkingDepot#readme",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/Zambie223/DimensionalSinkingDepot/issues",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "DimensionalSinkingDepot",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "SML",
+			"Enabled": true,
+			"SemVersion": "^3.12.0"
+		}
+	]
+}
