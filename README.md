@@ -16,7 +16,9 @@ A normal uploader stops taking items when the Dimensional Depot is full for that
 
 You need Satisfactory 1.2 (build 517554 or newer) with Satisfactory Mod Loader (SML) 3.12 or newer installed.
 
-The mod isn't on the Satisfactory Mod Repository yet, so Satisfactory Mod Manager can't install it. Install a release from this repository by hand:
+The easiest way is [Satisfactory Mod Manager](https://smm.ficsit.app/): search for **Dimensional Sinking Depot** and install it. Its page on the Satisfactory Mod Repository is [ficsit.app/mod/DimensionalSinkingDepot](https://ficsit.app/mod/DimensionalSinkingDepot).
+
+To install a release by hand instead:
 
 1. From the Releases page, download the zip for where it will run:
    - `DimensionalSinkingDepot-Windows.zip` for your game
