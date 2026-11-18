@@ -22,12 +22,15 @@ namespace SinkingDepot::Window
 		UMaterialInterface* GrinderMaterial()
 		{
 			// Loaded on first use (game thread). The material lives in the mod's pak, so it stays loaded once found.
+			// A failed load is not retried: it would be a blocking lookup plus an error line on every call.
 			static TWeakObjectPtr<UMaterialInterface> Cached;
-			if (!Cached.IsValid())
+			static bool bLoadFailed = false;
+			if (!Cached.IsValid() && !bLoadFailed)
 			{
 				Cached = LoadObject<UMaterialInterface>(nullptr, GrinderMaterialPath);
 				if (!Cached.IsValid())
 				{
+					bLoadFailed = true;
 					UE_LOG(LogSinkingDepot, Error, TEXT("Could not load %s; Sinking Depots keep the vanilla window"), GrinderMaterialPath);
 				}
 			}
@@ -103,7 +106,7 @@ namespace SinkingDepot::Window
 		 */
 		void ScheduleDefaultPaint(AFGCentralStorageContainer* Self)
 		{
-			if (!SinkingDepot::IsSinkingDepot(Self) || !Self->HasAuthority() || !Self->GetWorld())
+			if (!Self->HasAuthority() || !Self->GetWorld())
 			{
 				return;
 			}
@@ -154,15 +157,15 @@ namespace SinkingDepot::Window
 		ForEachGrinder(Building, false, [bActive](UMaterialInstanceDynamic* Dynamic) { SetParameters(Dynamic, bActive); });
 	}
 
+	void OnBuildingBeginPlay(AFGCentralStorageContainer* Building)
+	{
+		Apply(Building);
+		ScheduleDefaultPaint(Building);
+	}
+
 	void InstallHooks()
 	{
 #if !WITH_EDITOR
-		SUBSCRIBE_METHOD_VIRTUAL_AFTER(AFGCentralStorageContainer::BeginPlay, GetMutableDefault<AFGCentralStorageContainer>(),
-			[](AFGCentralStorageContainer* Self)
-			{
-				OnBuildingReady(Self);
-				ScheduleDefaultPaint(Self);
-			});
 		// Buildings coming out of a save get PostLoadGame (before their BeginPlay); mark them so the default paint skips them.
 		SUBSCRIBE_METHOD_VIRTUAL_AFTER(AFGCentralStorageContainer::PostLoadGame_Implementation, GetMutableDefault<AFGCentralStorageContainer>(),
 			[](AFGCentralStorageContainer* Self, int32 SaveVersion, int32 GameVersion)

@@ -5,6 +5,7 @@
 #include <atomic>
 
 class AActor;
+class AFGCentralStorageContainer;
 class AFGCentralStorageSubsystem;
 class AFGResourceSinkSubsystem;
 
@@ -40,11 +41,14 @@ namespace SinkingDepot::Overflow
 
 	FRuntime& Runtime();
 
-	/**
-	 * Installs the after-hooks on AFGCentralStorageContainer::Factory_Tick (the sinking) and ::BeginPlay (linking the
-	 * building's power connector to its power info). Packaged game only.
-	 */
+	/** Installs the after-hook on AFGCentralStorageContainer::Factory_Tick (the sinking). Packaged game only. */
 	void InstallHook();
+
+	/**
+	 * Everyone, from the module's single BeginPlay hook; Building must be a Sinking Depot. Links the building's extra
+	 * power connector to its power info.
+	 */
+	void OnBuildingBeginPlay(AFGCentralStorageContainer* Building);
 
 	/** Server side, game thread: true if this building is unpowered while power is required (for the status command). */
 	bool IsBlockedByPower(const AActor* Building);

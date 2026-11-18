@@ -1,5 +1,9 @@
-"""Draws the Dimensional Sinking Depot artwork: a violet isometric depot cube whose top face is an orange vortex,
-with an arrow sinking into it. Original drawing with Pillow, no game or external art.
+"""Makes the Dimensional Sinking Depot icons.
+
+Build menu / unlock icons come from Branding/IconRender_SinkingDepot_1024.png, an in-game render of the building
+(grinder running) on a transparent background, made with the dev-build flag -SinkingDepotIconRender.
+The mod logo is a drawing: a violet isometric depot cube whose top face is an orange vortex, with an arrow sinking
+into it (Pillow, no game or external art).
 
 Writes:
   Branding/IconDesc_SinkingDepot_512.png, _256.png  - transparent build-menu / unlock icons (imported by create_assets.py)
@@ -183,6 +187,23 @@ def rounded_background():
     return img
 
 
+RENDER_NAME = "IconRender_SinkingDepot_1024.png"
+ICON_MARGIN = 0.03  # share of the icon left empty on each side
+
+
+def building_icon(path):
+    """Square BASE px icon from the transparent in-game render: crop to the visible pixels, centre, add a margin."""
+    render = Image.open(path).convert("RGBA")
+    box = render.getchannel("A").point(lambda a: 255 if a > 8 else 0).getbbox()
+    if box is None:
+        raise SystemExit(f"{path} has no visible pixels")
+    building = render.crop(box)
+    side = round(max(building.size) / (1.0 - 2.0 * ICON_MARGIN))
+    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    square.alpha_composite(building, ((side - building.width) // 2, (side - building.height) // 2))
+    return square.resize((BASE, BASE), Image.LANCZOS)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", help="also write previews (icons on light and dark backgrounds) to this folder")
@@ -194,11 +215,13 @@ def main():
     os.makedirs(branding, exist_ok=True)
     os.makedirs(resources, exist_ok=True)
 
-    obj = render_object().resize((BASE, BASE), Image.LANCZOS)
+    # Build menu / unlock icons: the in-game render of the building (like the game's own building icons), cropped to
+    # the building with a small margin and squared. The drawing below stays the mod logo.
+    obj = building_icon(os.path.join(branding, RENDER_NAME))
     obj.save(os.path.join(branding, "IconDesc_SinkingDepot_512.png"))
     obj.resize((256, 256), Image.LANCZOS).save(os.path.join(branding, "IconDesc_SinkingDepot_256.png"))
 
-    # Mod logo: the same drawing, slightly smaller, on the rounded background used by the author's other mods.
+    # Mod logo: the original drawing on the rounded background used by the author's other mods.
     logo = rounded_background()
     inner = render_object().resize((int(N * 0.86), int(N * 0.86)), Image.LANCZOS)
     logo.alpha_composite(inner, ((N - inner.width) // 2, (N - inner.height) // 2 + s(6)))

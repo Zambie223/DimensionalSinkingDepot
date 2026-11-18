@@ -12,6 +12,7 @@
 #include "SinkingDepotSubsystem.h"
 
 #include "Buildables/FGCentralStorageContainer.h"
+#include "Buildables/FGBuildableStorage.h"
 #include "Camera/CameraActor.h"
 #include "Components/MeshComponent.h"
 #include "Engine/World.h"
@@ -36,6 +37,7 @@
 #include "UObject/UObjectIterator.h"
 #include "FGFactoryColoringTypes.h"
 #include "Hologram/FGHologram.h"
+#include "Hologram/FGSplineHologram.h"
 #include "Buildables/FGBuildablePowerPole.h"
 #include "Buildables/FGBuildableWire.h"
 #include "FGCircuitSubsystem.h"
@@ -50,6 +52,7 @@
 #include "FGSchematicManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "GameFramework/Pawn.h"
@@ -57,6 +60,19 @@
 #include "Resources/FGItemDescriptor.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SceneCapture2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "FGBuildEffectActor.h"
+#include "FGGameState.h"
+#include "FGRecipeManager.h"
+#include "HAL/PlatformTime.h"
+#include "ImageUtils.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "TextureResource.h"
 
 namespace
 {
@@ -702,6 +718,9 @@ namespace
 {
 	void ReportAndShoot(UWorld* World, AFGBuildable* Buildable);
 
+	/** If set, -SinkingDepotDevBuild hands the new building to this instead of taking the usual screenshots. */
+	TFunction<void(UWorld*, AFGBuildable*)> GOnDevBuilt;
+
 	/** Names of the hologram's current construct disqualifiers, comma-separated ("" if none or no hologram). */
 	FString DescribeDisqualifiers(AFGHologram* Hologram)
 	{
@@ -713,6 +732,12 @@ namespace
 			for (const TSubclassOf<UFGConstructDisqualifier>& Disqualifier : Disqualifiers)
 			{
 				Reasons += (Reasons.IsEmpty() ? TEXT("") : TEXT(", ")) + GetNameSafe(Disqualifier.Get());
+			}
+			// Child holograms (a belt's auto-placed poles) can be what's invalid.
+			for (AFGHologram* Child : Hologram->GetHologramChildren())
+			{
+				const FString ChildReasons = DescribeDisqualifiers(Child);
+				Reasons += FString::Printf(TEXT("%s%s: {%s}"), Reasons.IsEmpty() ? TEXT("") : TEXT(", "), *GetNameSafe(Child), *ChildReasons);
 			}
 		}
 		return Reasons;
@@ -815,6 +840,13 @@ namespace
 						if (P2 && P2->IsBuildGunEquipped())
 						{
 							P2->ToggleBuildGun();
+						}
+						if (GOnDevBuilt)
+						{
+							const TFunction<void(UWorld*, AFGBuildable*)> OnBuilt = MoveTemp(GOnDevBuilt);
+							GOnDevBuilt = nullptr;
+							OnBuilt(W2, *It);
+							return;
 						}
 						ReportAndShoot(W2, *It);
 						return;
@@ -957,6 +989,981 @@ namespace
 				}), 2.5f + Index * 3.0f, false);
 			}
 		}), 15.0f, false);
+	}
+}
+
+namespace
+{
+	constexpr const TCHAR* StorageContainerClassPath = TEXT("/Game/FactoryGame/Buildable/Factory/StorageContainerMk1/Build_StorageContainerMk1.Build_StorageContainerMk1_C");
+	constexpr const TCHAR* BeltRecipePath = TEXT("/Game/FactoryGame/Recipes/Buildings/Recipe_ConveyorBeltMk1.Recipe_ConveyorBeltMk1_C");
+
+	/**
+	 * What decides whether a building shows, one entry per part: the actor (hidden, build effect), every primitive
+	 * component (visibility, registration, render state, colored-instance state, materials) and how many build
+	 * effect actors exist in the world.
+	 */
+	TMap<FString, FString> DescribeVisualState(AFGBuildable* Building)
+	{
+		TMap<FString, FString> State;
+		State.Add(TEXT("actor"), FString::Printf(TEXT("hidden %d, build effect playing %d, effect actor %s"),
+			Building->IsHidden(), Building->IsPlayingBuildEffect(), *GetNameSafe(Building->GetBuildEffectActor())));
+		TInlineComponentArray<UPrimitiveComponent*> Primitives(Building);
+		for (UPrimitiveComponent* Primitive : Primitives)
+		{
+			if (!Primitive)
+			{
+				continue;
+			}
+			FString Line = FString::Printf(TEXT("[%s] visible %d, hidden in game %d, registered %d, render state %d"), *Primitive->GetClass()->GetName(),
+				Primitive->IsVisible(), Primitive->bHiddenInGame, Primitive->IsRegistered(), Primitive->IsRenderStateCreated());
+			if (const UFGColoredInstanceMeshProxy* Proxy = Cast<UFGColoredInstanceMeshProxy>(Primitive))
+			{
+				Line += FString::Printf(TEXT(", instanced %d"), Proxy->mInstanceHandle.IsInstanced());
+			}
+			if (const UMeshComponent* Mesh = Cast<UMeshComponent>(Primitive))
+			{
+				Line += TEXT(", materials [");
+				for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+				{
+					Line += (Slot ? TEXT(", ") : TEXT("")) + GetNameSafe(Mesh->GetMaterial(Slot));
+				}
+				Line += TEXT("]");
+			}
+			State.Add(Primitive->GetName(), Line);
+		}
+		if (AFGCentralStorageContainer* Uploader = Cast<AFGCentralStorageContainer>(Building))
+		{
+			const ASinkingDepotSubsystem* Subsystem = ASinkingDepotSubsystem::Get(Building->GetWorld());
+			const UFGInventoryComponent* Inventory = Uploader->GetStorageInventory();
+			State.Add(TEXT("work"), FString::Printf(TEXT("items in the uploader %d, grinder active %d"),
+				Inventory ? Inventory->GetNumItems(nullptr) : -1, Subsystem && Subsystem->IsGrinderActive(Building)));
+		}
+		int32 Effects = 0;
+		for (TActorIterator<AFGBuildEffectActor> It(Building->GetWorld()); It; ++It)
+		{
+			++Effects;
+		}
+		State.Add(TEXT("world"), FString::Printf(TEXT("build effect actors: %d"), Effects));
+		return State;
+	}
+
+	/** Every 0.1 s for Seconds: logs whatever changed in the building's visual state (and frame hitches), then OnDone. */
+	void MonitorVisualState(const TWeakObjectPtr<UWorld> WeakWorld, const TWeakObjectPtr<AFGBuildable> Weak, const FString Label, const double Start,
+		const double Previous, const TSharedRef<TMap<FString, FString>> Last, const double Seconds, const TFunction<void()> OnDone)
+	{
+		UWorld* World = WeakWorld.Get();
+		if (!World)
+		{
+			return;
+		}
+		const double Now = FPlatformTime::Seconds();
+		if (Now - Previous > 0.5)
+		{
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s t=%.2f: hitch, %.2f s since the last poll"), *Label, Now - Start, Now - Previous);
+		}
+		if (AFGBuildable* Building = Weak.Get())
+		{
+			TMap<FString, FString> State = DescribeVisualState(Building);
+			for (const TPair<FString, FString>& Pair : State)
+			{
+				const FString* Was = Last->Find(Pair.Key);
+				if (!Was || *Was != Pair.Value)
+				{
+					UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s t=%.2f %s: %s"), *Label, Now - Start, *Pair.Key, *Pair.Value);
+				}
+			}
+			for (const TPair<FString, FString>& Pair : *Last)
+			{
+				if (!State.Contains(Pair.Key))
+				{
+					UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s t=%.2f %s: gone"), *Label, Now - Start, *Pair.Key);
+				}
+			}
+			*Last = MoveTemp(State);
+		}
+		else
+		{
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s t=%.2f: the building no longer exists"), *Label, Now - Start);
+		}
+		if (Now - Start > Seconds)
+		{
+			OnDone();
+			return;
+		}
+		FTimerHandle Handle;
+		World->GetTimerManager().SetTimer(Handle, FTimerDelegate::CreateWeakLambda(World, [WeakWorld, Weak, Label, Start, Now, Last, Seconds, OnDone]()
+		{
+			MonitorVisualState(WeakWorld, Weak, Label, Start, Now, Last, Seconds, OnDone);
+		}), 0.1f, false);
+	}
+
+	/** Runs Function after Delay seconds of game time, if the world still exists. */
+	void After(UWorld* World, const float Delay, TFunction<void(UWorld*)> Function)
+	{
+		const TWeakObjectPtr<UWorld> WeakWorld(World);
+		FTimerHandle Handle;
+		World->GetTimerManager().SetTimer(Handle, FTimerDelegate::CreateWeakLambda(World, [WeakWorld, Function = MoveTemp(Function)]()
+		{
+			if (UWorld* W = WeakWorld.Get())
+			{
+				Function(W);
+			}
+		}), Delay, false);
+	}
+
+	AFGCharacterPlayer* LocalPlayer(UWorld* World, APlayerController*& OutController)
+	{
+		OutController = World ? World->GetFirstPlayerController() : nullptr;
+		return OutController ? Cast<AFGCharacterPlayer>(OutController->GetPawn()) : nullptr;
+	}
+
+	/** Points the player's view at a world location (the build gun aims along the camera). */
+	void AimAt(APlayerController* Controller, const FVector& Target)
+	{
+		const FVector Eye = Controller->PlayerCameraManager ? Controller->PlayerCameraManager->GetCameraLocation() : Controller->GetPawn()->GetActorLocation();
+		Controller->SetControlRotation((Target - Eye).Rotation());
+	}
+
+	void LogBuildGunState(UWorld* World, const FString& Label, const TCHAR* Step)
+	{
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		AFGBuildGun* Gun = Player ? Player->GetBuildGun() : nullptr;
+		UFGBuildGunStateBuild* BuildState = Gun ? Cast<UFGBuildGunStateBuild>(Gun->GetCurrentState()) : nullptr;
+		AFGHologram* Hologram = BuildState ? BuildState->GetHologram() : nullptr;
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s %s: gun equipped %d, state %s, hologram %s at %s, aiming at %s (%s), disqualifiers [%s]"),
+			*Label, Step, Player && Player->IsBuildGunEquipped(), *GetNameSafe(Gun ? Gun->GetCurrentState() : nullptr), *GetNameSafe(Hologram),
+			Hologram ? *Hologram->GetActorLocation().ToCompactString() : TEXT("-"), Gun ? *GetNameSafe(Gun->GetHitResult().GetActor()) : TEXT("-"),
+			Gun ? *Gun->GetHitResult().ImpactPoint.ToCompactString() : TEXT("-"), *DescribeDisqualifiers(Hologram));
+	}
+
+	void InjectActionsForKey(UWorld* World, const FKey& Key); // defined with the build menu check below
+	void WatchBuilding(UWorld* W, const FString& Label, const TWeakObjectPtr<AFGBuildable> WeakTarget, const TWeakObjectPtr<UFGFactoryConnectionComponent> WeakInput,
+		const FVector Centre, const FVector Out, const TFunction<void()> OnDone);
+
+	/** What a belt build step changes: the hologram object (a new one after building), its build step, the connection. */
+	struct FBeltSnapshot
+	{
+		TWeakObjectPtr<AFGHologram> Hologram;
+		int32 Step = -1;
+		bool bCanTakeNextStep = false;
+		bool bConnected = false;
+
+		FString Describe() const
+		{
+			return FString::Printf(TEXT("hologram %s, build step %d, can take next step %d, input connected %d"),
+				*GetNameSafe(Hologram.Get()), Step, bCanTakeNextStep, bConnected);
+		}
+	};
+
+	FBeltSnapshot SnapshotBelt(UWorld* World, const TWeakObjectPtr<UFGFactoryConnectionComponent>& Input)
+	{
+		FBeltSnapshot Snapshot;
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		AFGBuildGun* Gun = Player ? Player->GetBuildGun() : nullptr;
+		UFGBuildGunStateBuild* State = Gun ? Cast<UFGBuildGunStateBuild>(Gun->GetCurrentState()) : nullptr;
+		AFGHologram* Hologram = State ? State->GetHologram() : nullptr;
+		Snapshot.Hologram = Hologram;
+		if (AFGSplineHologram* Spline = Cast<AFGSplineHologram>(Hologram))
+		{
+			Snapshot.Step = static_cast<int32>(Spline->GetCurrentBuildStep());
+		}
+		Snapshot.bCanTakeNextStep = Hologram && Hologram->CanTakeNextBuildStep();
+		Snapshot.bConnected = Input.IsValid() && Input->IsConnected();
+		return Snapshot;
+	}
+
+	/**
+	 * Advances the belt hologram one build step, like one click. Input paths, tried in turn until the hologram reacts
+	 * (another hologram object, another build step, or the input got connected):
+	 * 0. AFGBuildGun::OnPrimaryFirePressed / Released (what placed the depot itself);
+	 * 1. the build state's PrimaryFire / PrimaryFireRelease directly (skips the build gun's own gating);
+	 * 2. the Enhanced Input action(s) mapped to the left mouse button (the path a real click takes).
+	 * OnDone gets whether it advanced.
+	 */
+	void AdvanceBelt(UWorld* World, const FString Label, const FString StepName, const int32 Method, const TWeakObjectPtr<UFGFactoryConnectionComponent> Input,
+		const TFunction<void(UWorld*, bool)> OnDone)
+	{
+		static const TCHAR* Methods[] = {
+			TEXT("build gun OnPrimaryFirePressed/Released"),
+			TEXT("build state PrimaryFire/PrimaryFireRelease"),
+			TEXT("Enhanced Input action for the left mouse button"),
+		};
+		const FBeltSnapshot Before = SnapshotBelt(World, Input);
+		LogBuildGunState(World, Label, *FString::Printf(TEXT("%s, method %d (%s), before: %s"), *StepName, Method, Methods[Method], *Before.Describe()));
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		AFGBuildGun* Gun = Player ? Player->GetBuildGun() : nullptr;
+		if (Gun && Method == 0)
+		{
+			Gun->OnPrimaryFirePressed();
+			After(World, 0.15f, [](UWorld* W)
+			{
+				APlayerController* C = nullptr;
+				if (AFGCharacterPlayer* P = LocalPlayer(W, C); P && P->GetBuildGun())
+				{
+					P->GetBuildGun()->OnPrimaryFireReleased();
+				}
+			});
+		}
+		else if (Gun && Method == 1)
+		{
+			if (UFGBuildGunState* State = Gun->GetCurrentState())
+			{
+				State->PrimaryFire();
+				After(World, 0.15f, [WeakState = TWeakObjectPtr<UFGBuildGunState>(State)](UWorld*)
+				{
+					if (UFGBuildGunState* S = WeakState.Get())
+					{
+						S->PrimaryFireRelease();
+					}
+				});
+			}
+		}
+		else if (Method == 2)
+		{
+			InjectActionsForKey(World, EKeys::LeftMouseButton);
+		}
+		After(World, 1.2f, [Label, StepName, Method, Input, OnDone, Before](UWorld* W)
+		{
+			const FBeltSnapshot Now = SnapshotBelt(W, Input);
+			const bool bChanged = Now.Hologram != Before.Hologram || Now.Step != Before.Step || Now.bConnected != Before.bConnected;
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s %s, method %d: %s; now %s"), *Label, *StepName, Method,
+				bChanged ? TEXT("ADVANCED") : TEXT("no change"), *Now.Describe());
+			if (bChanged || Method >= 2)
+			{
+				OnDone(W, bChanged);
+				return;
+			}
+			AdvanceBelt(W, Label, StepName, Method + 1, Input, OnDone);
+		});
+	}
+
+	/**
+	 * Builds a Mk1 belt into Target's input with the player's real build gun (first step on the input, second on
+	 * the ground 12 m out), the same path as a player's clicks, then watches the building for 20 s: state changes are
+	 * logged every 0.1 s and screenshots are taken from a fixed camera. Then OnDone.
+	 */
+	void BuildBeltInto(UWorld* World, AFGBuildable* Target, const FString& Label, TFunction<void()> OnDone, const bool bFeed = false, UClass* FeedItem = nullptr)
+	{
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		UFGFactoryConnectionComponent* Input = FindInput(Target);
+		UClass* Recipe = LoadClass<UFGRecipe>(nullptr, BeltRecipePath);
+		if (!Player || !Input || !Recipe)
+		{
+			UE_LOG(LogSinkingDepot, Error, TEXT("[dev] BeltCheck %s: player, input or belt recipe missing"), *Label);
+			OnDone();
+			return;
+		}
+		if (AFGRecipeManager* Recipes = AFGRecipeManager::Get(World))
+		{
+			Recipes->AddAvailableRecipe(Recipe);
+		}
+		if (AFGGameState* State = World->GetGameState<AFGGameState>())
+		{
+			State->SetCheatNoCost(true);
+		}
+		// In case the no-cost cheat doesn't cover the build gun: plates for the belt, in the player's inventory.
+		if (UClass* Plate = LoadClass<UFGItemDescriptor>(nullptr, TEXT("/Game/FactoryGame/Resource/Parts/IronPlate/Desc_IronPlate.Desc_IronPlate_C")))
+		{
+			const int32 Added = Player->GetInventory()->AddStack(FInventoryStack(100, Plate), true);
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s: %d Iron Plates into the player's inventory"), *Label, Added);
+		}
+		const FVector Centre = Target->GetComponentsBoundingBox(true).GetCenter();
+		const FVector InputLocation = Input->GetComponentLocation();
+		FVector Out = InputLocation - Centre;
+		Out.Z = 0.0f;
+		Out = Out.GetSafeNormal();
+		const FVector Stand = FindGround(World, InputLocation + Out * 1900.0f, 3000.0f) + FVector(0, 0, 180.0f);
+		Player->TeleportTo(Stand, (-Out).Rotation());
+		Controller->SetControlRotation((-Out).Rotation());
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s: target %s, input at %s (connected %d), player to %s"),
+			*Label, *Target->GetName(), *InputLocation.ToCompactString(), Input->IsConnected(), *Stand.ToCompactString());
+
+		// Empty belt: from the input to the ground 12 m out. Fed belt: from a storage container full of Iron Plates
+		// (12 m out and 7 m to the side) into the input, so items arrive as soon as the belt exists.
+		FVector StartPoint = InputLocation;
+		FVector EndPoint = FindGround(World, InputLocation + Out * 1200.0f, 3000.0f) + FVector(0, 0, 20.0f);
+		if (bFeed)
+		{
+			const FVector Side = FVector::CrossProduct(Out, FVector::UpVector);
+			AFGBuildable* Container = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, StorageContainerClassPath), InputLocation + Out * 1200.0f + Side * 700.0f, (-Out).Rotation().Yaw);
+			AFGBuildableStorage* Storage = Cast<AFGBuildableStorage>(Container);
+			UFGFactoryConnectionComponent* Output = nullptr;
+			if (Container)
+			{
+				TInlineComponentArray<UFGFactoryConnectionComponent*> Connections(Container);
+				for (UFGFactoryConnectionComponent* Connection : Connections)
+				{
+					if (Connection && Connection->GetDirection() == EFactoryConnectionDirection::FCD_OUTPUT)
+					{
+						Output = Connection;
+						break;
+					}
+				}
+			}
+			UClass* Plate = FeedItem ? FeedItem : LoadClass<UFGItemDescriptor>(nullptr, TEXT("/Game/FactoryGame/Resource/Parts/IronPlate/Desc_IronPlate.Desc_IronPlate_C"));
+			const int32 Stocked = Storage && Storage->GetStorageInventory() && Plate ? Storage->GetStorageInventory()->AddStack(FInventoryStack(2000, Plate), true) : 0;
+			if (!Output)
+			{
+				UE_LOG(LogSinkingDepot, Error, TEXT("[dev] BeltCheck %s: storage container or its output missing; feeding skipped"), *Label);
+			}
+			else
+			{
+				StartPoint = Output->GetComponentLocation();
+				EndPoint = InputLocation;
+				UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s: storage container %s with %d x %s, output at %s"),
+					*Label, *Container->GetName(), Stocked, *GetNameSafe(Plate), *StartPoint.ToCompactString());
+			}
+		}
+
+		const TWeakObjectPtr<AFGBuildable> WeakTarget(Target);
+		const TWeakObjectPtr<UFGFactoryConnectionComponent> WeakInput(Input);
+		After(World, 1.5f, [Recipe](UWorld* W)
+		{
+			APlayerController* C = nullptr;
+			if (AFGCharacterPlayer* P = LocalPlayer(W, C); P && P->GetBuildGun())
+			{
+				if (!P->IsBuildGunEquipped())
+				{
+					P->ToggleBuildGun();
+				}
+				After(W, 1.0f, [Recipe](UWorld* W2)
+				{
+					APlayerController* C2 = nullptr;
+					if (AFGCharacterPlayer* P2 = LocalPlayer(W2, C2); P2 && P2->GetBuildGun())
+					{
+						P2->GetBuildGun()->GotoBuildState(Recipe);
+					}
+				});
+			}
+		});
+		After(World, 5.0f, [StartPoint](UWorld* W)
+		{
+			APlayerController* C = nullptr;
+			if (LocalPlayer(W, C))
+			{
+				AimAt(C, StartPoint);
+			}
+		});
+		// Aim at the input and advance the belt hologram one build step (start on the input); then aim at the end point
+		// and advance again, which builds it. Each advance tries the input paths in turn until the hologram reacts.
+		const FVector End = EndPoint;
+		After(World, 7.5f, [Label, End, WeakTarget, WeakInput, Centre, Out, OnDone](UWorld* W)
+		{
+			AdvanceBelt(W, Label, TEXT("start"), 0, WeakInput, [Label, End, WeakTarget, WeakInput, Centre, Out, OnDone](UWorld* W2, bool)
+			{
+				APlayerController* C = nullptr;
+				if (LocalPlayer(W2, C))
+				{
+					AimAt(C, End);
+				}
+				After(W2, 2.5f, [Label, WeakTarget, WeakInput, Centre, Out, OnDone](UWorld* W3)
+				{
+					// The end click may place a pole whose height is set by one more click (build step "adjust pole"),
+					// like in normal play; keep advancing until the belt exists (input connected), at most 3 more.
+					const TSharedRef<TFunction<void(UWorld*, int32)>> Finish = MakeShared<TFunction<void(UWorld*, int32)>>();
+					*Finish = [Label, WeakTarget, WeakInput, Centre, Out, OnDone, Finish](UWorld* W4, const int32 Click)
+					{
+						if ((WeakInput.IsValid() && WeakInput->IsConnected()) || Click >= 3)
+						{
+							// The self-reference stays (a few bytes per run of a dev test); clearing it here would destroy
+							// the running lambda.
+							WatchBuilding(W4, Label, WeakTarget, WeakInput, Centre, Out, OnDone);
+							return;
+						}
+						AdvanceBelt(W4, Label, FString::Printf(TEXT("end click %d"), Click + 1), 0, WeakInput, [Finish, Click](UWorld* W5, bool)
+						{
+							(*Finish)(W5, Click + 1);
+						});
+					};
+					(*Finish)(W3, 0);
+				});
+			});
+		});
+	}
+
+	/** After the belt build: 20 s of state logging and screenshots from a fixed camera, then OnDone. */
+	void WatchBuilding(UWorld* W, const FString& Label, const TWeakObjectPtr<AFGBuildable> WeakTarget, const TWeakObjectPtr<UFGFactoryConnectionComponent> WeakInput,
+		const FVector Centre, const FVector Out, const TFunction<void()> OnDone)
+	{
+		const double Start = FPlatformTime::Seconds();
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s t=0: watching the building"), *Label);
+		// Watch from a fixed camera that sees the building's input side and front.
+		AFGBuildable* Target = WeakTarget.Get();
+		if (Target)
+		{
+			const FVector Camera = Centre + Out * 1000.0f + Target->GetActorForwardVector() * 900.0f + FVector(0, 0, 450.0f);
+			GShowcaseShots.Reset();
+			AddShot(W, TEXT("belt"), Centre, Camera);
+			After(W, 0.3f, [](UWorld* W2)
+			{
+				ViewCamera(W2, GShowcaseShots.Num() ? GShowcaseShots[0].Camera.Get() : nullptr);
+			});
+		}
+		static const float ShotTimes[] = { 0.6f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 5.5f, 7.0f, 9.0f, 12.0f, 16.0f };
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(ShotTimes); ++Index)
+		{
+			const FString Name = FString::Printf(TEXT("SinkingDepotShowcase_belt_%s_%02d_t%.1f.png"), *Label, Index, ShotTimes[Index]);
+			After(W, ShotTimes[Index], [Name](UWorld*) { FScreenshotRequest::RequestScreenshot(Name, false, false); });
+		}
+		After(W, 2.0f, [Label, WeakInput](UWorld* W2)
+		{
+			const UFGFactoryConnectionComponent* In = WeakInput.Get();
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] BeltCheck %s: input connected %d (%s)"), *Label, In && In->IsConnected(),
+				In && In->GetConnection() ? *GetNameSafe(In->GetConnection()->GetOwner()) : TEXT("-"));
+			APlayerController* C = nullptr;
+			if (AFGCharacterPlayer* P = LocalPlayer(W2, C); P && P->IsBuildGunEquipped())
+			{
+				P->ToggleBuildGun();
+			}
+		});
+		MonitorVisualState(W, WeakTarget, Label, Start, Start, MakeShared<TMap<FString, FString>>(), 20.0f, [WeakWorld = TWeakObjectPtr<UWorld>(W), OnDone]()
+		{
+			if (UWorld* W2 = WeakWorld.Get())
+			{
+				APlayerController* C = nullptr;
+				if (AFGCharacterPlayer* P = LocalPlayer(W2, C))
+				{
+					C->SetViewTargetWithBlend(P, 0.0f);
+				}
+			}
+			OnDone();
+		});
+	}
+
+	/** The visible meshes' bounds (not the clearance or connection boxes). */
+	FBox VisibleMeshBounds(AActor* Building)
+	{
+		FBox Box(ForceInit);
+		TInlineComponentArray<UMeshComponent*> Meshes(Building);
+		for (UMeshComponent* Mesh : Meshes)
+		{
+			if (Mesh && Mesh->IsVisible() && Mesh->IsRegistered() && !Mesh->IsA<USkeletalMeshComponent>())
+			{
+				Box += Mesh->Bounds.GetBox();
+			}
+		}
+		return Box;
+	}
+
+	/**
+	 * Renders only Building (nothing else in the world, no sky or fog) from a direction given in building space, with a
+	 * scene capture into a float render target, and writes a 1024 px PNG with a transparent background to the
+	 * screenshot folder. The raw HDR colour is tone mapped with a simple exposure + filmic curve. Captured a few
+	 * frames in a row first so temporal anti-aliasing settles.
+	 */
+	void RenderIcon(UWorld* World, AActor* Building, const FString& Name, const FVector& LocalDirection, const float Fov, TFunction<void()> OnDone)
+	{
+		const FBox Box = VisibleMeshBounds(Building);
+		const FVector Direction = Building->GetActorTransform().TransformVectorNoScale(LocalDirection.GetSafeNormal());
+		const float Radius = Box.GetExtent().Size();
+		const float Distance = Radius / FMath::Sin(FMath::DegreesToRadians(Fov * 0.5f)) * 0.9f;
+		const FVector Location = Box.GetCenter() + Direction * Distance;
+		ASceneCapture2D* Capture = World->SpawnActor<ASceneCapture2D>(Location, (-Direction).Rotation());
+		USceneCaptureComponent2D* Component = Capture ? Capture->GetCaptureComponent2D() : nullptr;
+		if (!Component)
+		{
+			OnDone();
+			return;
+		}
+		UTextureRenderTarget2D* Target = NewObject<UTextureRenderTarget2D>(Capture);
+		Target->RenderTargetFormat = RTF_RGBA16f;
+		Target->ClearColor = FLinearColor::Transparent;
+		Target->bAutoGenerateMips = false;
+		Target->InitAutoFormat(1024, 1024);
+		Target->UpdateResourceImmediate(true);
+		Component->TextureTarget = Target;
+		Component->CaptureSource = ESceneCaptureSource::SCS_SceneColorHDR;
+		Component->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+		Component->ShowOnlyActors.Add(Building);
+		Component->FOVAngle = Fov;
+		Component->bCaptureEveryFrame = false;
+		Component->bCaptureOnMovement = false;
+		Component->bAlwaysPersistRenderingState = true;
+		Component->ShowFlags.SetAtmosphere(false);
+		Component->ShowFlags.SetFog(false);
+		Component->ShowFlags.SetCloud(false);
+		for (int32 Frame = 0; Frame < 12; ++Frame)
+		{
+			After(World, 0.05f + Frame * 0.1f, [WeakComponent = TWeakObjectPtr<USceneCaptureComponent2D>(Component)](UWorld*)
+			{
+				if (USceneCaptureComponent2D* C = WeakComponent.Get())
+				{
+					C->CaptureScene();
+				}
+			});
+		}
+		const TWeakObjectPtr<ASceneCapture2D> WeakCapture(Capture);
+		After(World, 1.5f, [WeakCapture, Target, Name, OnDone](UWorld*)
+		{
+			ASceneCapture2D* Capture = WeakCapture.Get();
+			FTextureRenderTargetResource* Resource = Capture ? Target->GameThread_GetRenderTargetResource() : nullptr;
+			TArray<FLinearColor> Pixels;
+			if (!Resource || !Resource->ReadLinearColorPixels(Pixels) || Pixels.Num() != 1024 * 1024)
+			{
+				UE_LOG(LogSinkingDepot, Error, TEXT("[dev] Icon %s: reading the render target failed"), *Name);
+				OnDone();
+				return;
+			}
+			// Scene colour alpha is 1 - coverage in some engine versions; an empty corner says which.
+			const bool bInverted = Pixels[0].A > 0.5f;
+			TArray<float> Luminance;
+			for (const FLinearColor& Pixel : Pixels)
+			{
+				const float Coverage = bInverted ? 1.0f - Pixel.A : Pixel.A;
+				if (Coverage > 0.95f)
+				{
+					Luminance.Add(Pixel.GetLuminance() / Coverage);
+				}
+			}
+			Luminance.Sort();
+			const float Bright = Luminance.Num() ? FMath::Max(Luminance[FMath::Min(Luminance.Num() - 1, static_cast<int32>(Luminance.Num() * 0.97f))], 1e-4f) : 1.0f;
+			const float Exposure = 1.0f / Bright;
+			TArray64<FColor> Out;
+			Out.SetNumUninitialized(Pixels.Num());
+			for (int32 Index = 0; Index < Pixels.Num(); ++Index)
+			{
+				const FLinearColor& Pixel = Pixels[Index];
+				const float Coverage = FMath::Clamp(bInverted ? 1.0f - Pixel.A : Pixel.A, 0.0f, 1.0f);
+				if (Coverage < 0.002f)
+				{
+					Out[Index] = FColor(0, 0, 0, 0);
+					continue;
+				}
+				auto Curve = [Exposure, Coverage](const float Value) { return 1.0f - FMath::Exp(-2.0f * Exposure * Value / Coverage); };
+				FLinearColor Mapped(Curve(Pixel.R), Curve(Pixel.G), Curve(Pixel.B), Coverage);
+				Out[Index] = Mapped.ToFColor(true);
+			}
+			TArray64<uint8> Png;
+			FImageUtils::PNGCompressImageArray(1024, 1024, Out, Png);
+			const FString Path = FPaths::ScreenShotDir() / FString::Printf(TEXT("SinkingDepotShowcase_icon_%s.png"), *Name);
+			const bool bSaved = FFileHelper::SaveArrayToFile(Png, *Path);
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Icon %s: corner alpha %.3f, centre alpha %.3f (inverted %d), %d covered pixels, 97th percentile luminance %.4f, saved %d to %s"),
+				*Name, Pixels[0].A, Pixels[512 * 1024 + 512].A, bInverted, Luminance.Num(), Bright, bSaved, *Path);
+			Capture->Destroy();
+			OnDone();
+		});
+	}
+
+	/** Icon renders: our building idle and with the grinder running, the vanilla uploader for comparison, a few angles. */
+	void RenderIcons(UWorld* World, AFGBuildable* Ours, AFGBuildable* Vanilla)
+	{
+		struct FIconShot
+		{
+			FString Name;
+			TWeakObjectPtr<AFGBuildable> Building;
+			FVector Direction;
+			bool bActive;
+		};
+		// Building space: the window faces +X, the belt input is at +Y. Vanilla icons look at the front from above.
+		TArray<FIconShot> Shots = {
+			{TEXT("vanilla_a"), Vanilla, FVector(1.0f, 0.75f, 0.65f), false},
+			{TEXT("ours_a"), Ours, FVector(1.0f, 0.75f, 0.65f), false},
+			{TEXT("ours_b"), Ours, FVector(1.0f, -0.75f, 0.65f), false},
+			{TEXT("ours_c"), Ours, FVector(1.0f, 0.4f, 0.4f), false},
+			{TEXT("ours_a_active"), Ours, FVector(1.0f, 0.75f, 0.65f), true},
+			{TEXT("ours_b_active"), Ours, FVector(1.0f, -0.75f, 0.65f), true},
+		};
+		// Full-resolution textures for the close-up.
+		for (AFGBuildable* Building : {Ours, Vanilla})
+		{
+			if (Building)
+			{
+				TInlineComponentArray<UMeshComponent*> Meshes(Building);
+				for (UMeshComponent* Mesh : Meshes)
+				{
+					Mesh->PrestreamTextures(60.0f, false);
+				}
+			}
+		}
+		const TSharedRef<TFunction<void(int32)>> Next = MakeShared<TFunction<void(int32)>>();
+		*Next = [WeakWorld = TWeakObjectPtr<UWorld>(World), Shots, Next](const int32 Index)
+		{
+			UWorld* W = WeakWorld.Get();
+			if (!W)
+			{
+				return;
+			}
+			if (Index >= Shots.Num())
+			{
+				// The launcher waits for this file.
+				FScreenshotRequest::RequestScreenshot(TEXT("SinkingDepotShowcase_icons_done.png"), false, false);
+				*Next = nullptr; // Break the reference cycle.
+				return;
+			}
+			const FIconShot& Shot = Shots[Index];
+			AFGBuildable* Building = Shot.Building.Get();
+			if (!Building)
+			{
+				(*Next)(Index + 1);
+				return;
+			}
+			if (ASinkingDepotSubsystem* Subsystem = ASinkingDepotSubsystem::Get(W); Subsystem && SinkingDepot::IsSinkingDepot(Building))
+			{
+				Subsystem->SetForcedActive(Building, Shot.bActive);
+			}
+			// Look at it with the player camera too, so texture streaming sees it; then render after the grinder spun up.
+			const FVector Centre = VisibleMeshBounds(Building).GetCenter();
+			GShowcaseShots.Reset();
+			AddShot(W, Shot.Name, Centre, Centre + Building->GetActorTransform().TransformVectorNoScale(Shot.Direction.GetSafeNormal()) * 1500.0f);
+			ViewCamera(W, GShowcaseShots[0].Camera.Get());
+			After(W, 3.0f, [Shot, Next, Index](UWorld* W2)
+			{
+				if (AFGBuildable* B = Shot.Building.Get())
+				{
+					RenderIcon(W2, B, Shot.Name, Shot.Direction, 22.0f, [Next, Index]() { (*Next)(Index + 1); });
+				}
+			});
+		};
+		(*Next)(0);
+	}
+
+	/**
+	 * -SinkingDepotBeltCheck (with -SinkingDepotDevKit): looks into a building flickering when a belt is attached.
+	 * 1. builds a Sinking Depot with the build gun (the -SinkingDepotDevBuild path), waits for its build effect, then
+	 *    builds a belt into it;
+	 * 2. spawns a vanilla uploader and builds a belt into that, for comparison;
+	 * 3. spawns a second Sinking Depot (no build effect of its own) and builds a belt into that;
+	 * 4. renders the icon candidates (-SinkingDepotIconRender also renders them without the belt steps).
+	 */
+	void BeltCheck(UWorld* World)
+	{
+		GOnDevBuilt = [](UWorld* W, AFGBuildable* Built)
+		{
+			const TWeakObjectPtr<AFGBuildable> WeakBuilt(Built);
+			After(W, 12.0f, [WeakBuilt](UWorld* W2)
+			{
+				AFGBuildable* A = WeakBuilt.Get();
+				if (!A)
+				{
+					return;
+				}
+				BuildBeltInto(W2, A, TEXT("A_ours_buildgun_fed"), [WeakWorld = TWeakObjectPtr<UWorld>(W2), WeakBuilt]()
+				{
+					UWorld* W3 = WeakWorld.Get();
+					AFGBuildable* A2 = WeakBuilt.Get();
+					if (!W3 || !A2)
+					{
+						return;
+					}
+					const FVector Forward = A2->GetActorForwardVector();
+					AFGBuildable* Vanilla = SpawnOnGround(W3, LoadClass<AFGBuildable>(nullptr, VanillaBuildClassPath), A2->GetActorLocation() + Forward * 3500.0f, A2->GetActorRotation().Yaw);
+					AFGBuildable* Ours = SpawnOnGround(W3, LoadClass<AFGBuildable>(nullptr, BuildClassPath), A2->GetActorLocation() - Forward * 3500.0f, A2->GetActorRotation().Yaw);
+					const TWeakObjectPtr<AFGBuildable> WeakVanilla(Vanilla), WeakOurs(Ours);
+					After(W3, 5.0f, [WeakVanilla, WeakOurs](UWorld* W4)
+					{
+						if (!WeakVanilla.IsValid())
+						{
+							return;
+						}
+						BuildBeltInto(W4, WeakVanilla.Get(), TEXT("B_vanilla_fed"), [WeakWorld = TWeakObjectPtr<UWorld>(W4), WeakVanilla, WeakOurs]()
+						{
+							UWorld* W5 = WeakWorld.Get();
+							if (!W5 || !WeakOurs.IsValid())
+							{
+								return;
+							}
+							BuildBeltInto(W5, WeakOurs.Get(), TEXT("C_ours_spawned_fed"), [WeakWorld, WeakVanilla, WeakOurs]()
+							{
+								if (UWorld* W6 = WeakWorld.Get())
+								{
+									RenderIcons(W6, WeakOurs.Get(), WeakVanilla.Get());
+								}
+							}, true);
+						}, true);
+					});
+				}, true);
+			});
+		};
+		DevBuild(World);
+	}
+
+	/** -SinkingDepotIconRender without the belt check: spawns one of each and renders the icon candidates. */
+	void IconRenderOnly(UWorld* World)
+	{
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		if (!Player)
+		{
+			return;
+		}
+		const FRotator View(0.0f, Controller->GetControlRotation().Yaw, 0.0f);
+		const FVector Anchor = FindGround(World, Player->GetActorLocation(), 200000.0f) + View.Vector() * 3000.0f;
+		const FVector Right = FRotationMatrix(View).GetUnitAxis(EAxis::Y);
+		AFGBuildable* Ours = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, BuildClassPath), Anchor - Right * 1500.0f, View.Yaw + 180.0f);
+		AFGBuildable* Vanilla = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, VanillaBuildClassPath), Anchor + Right * 1500.0f, View.Yaw + 180.0f);
+		const TWeakObjectPtr<AFGBuildable> WeakOurs(Ours), WeakVanilla(Vanilla);
+		After(World, 5.0f, [WeakOurs, WeakVanilla](UWorld* W) { RenderIcons(W, WeakOurs.Get(), WeakVanilla.Get()); });
+	}
+
+	/**
+	 * -SinkingDepotRegression: a self-checking run over the shipping code paths, for releases. Every check logs
+	 * "[dev] Regression CHECK <name>: PASS|FAIL (<detail>)", and the run ends with "[dev] Regression RESULT: PASS|FAIL"
+	 * and the screenshot SinkingDepotShowcase_regression_done.png. A and B are Sinking Depots, V a vanilla uploader,
+	 * all spawned as newly placed buildings.
+	 * 1. BeginPlay: A's power connector is linked to its power info, its grinder window and default paint are applied;
+	 *    V gets neither.
+	 * 2. Depot full, from the buffer: exact points for 50 Iron Plate put into A; the grinder runs while it sinks and
+	 *    stops afterwards; A draws no power (the power option is off).
+	 * 3. Power option on (in memory only; the config file isn't touched) with A unwired: nothing sinks and it draws
+	 *    nothing. Off again: it sinks.
+	 * 4. Uploader can't keep up, from the belt: B's buffer is filled with Mercer Spheres (the depot is full of them and
+	 *    the sink refuses them, so they stay), and a fed belt brings Iron Rods, which must be sunk with none lost.
+	 */
+	struct FRegression
+	{
+		int32 Checks = 0;
+		int32 Failed = 0;
+		void Check(const TCHAR* Name, const bool bPass, const FString& Detail)
+		{
+			++Checks;
+			Failed += bPass ? 0 : 1;
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Regression CHECK %s: %s (%s)"), Name, bPass ? TEXT("PASS") : TEXT("FAIL"), *Detail);
+		}
+	};
+	FRegression GRegression;
+
+	constexpr const TCHAR* IronPlatePath = TEXT("/Game/FactoryGame/Resource/Parts/IronPlate/Desc_IronPlate.Desc_IronPlate_C");
+	constexpr const TCHAR* IronRodPath = TEXT("/Game/FactoryGame/Resource/Parts/IronRod/Desc_IronRod.Desc_IronRod_C");
+	constexpr const TCHAR* MercerSpherePath = TEXT("/Game/FactoryGame/Prototype/WAT/Desc_WAT2.Desc_WAT2_C");
+
+	/** Number of grinder window instances on the building; OutSpeed is the first one's Speed parameter (-1 if none). */
+	int32 CountGrinders(AActor* Building, float& OutSpeed)
+	{
+		OutSpeed = -1.0f;
+		int32 Count = 0;
+		if (!Building)
+		{
+			return 0;
+		}
+		TInlineComponentArray<UMeshComponent*> Meshes(Building);
+		for (UMeshComponent* Mesh : Meshes)
+		{
+			for (int32 Slot = 0; Mesh && Slot < Mesh->GetNumMaterials(); ++Slot)
+			{
+				const UMaterialInstanceDynamic* Dynamic = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(Slot));
+				if (Dynamic && Dynamic->Parent && Dynamic->Parent->GetPathName() == SinkingDepot::GrinderMaterialPath)
+				{
+					if (Count++ == 0)
+					{
+						Dynamic->GetScalarParameterValue(FHashedMaterialParameterInfo(FMaterialParameterInfo(FName(TEXT("Speed")))), OutSpeed);
+					}
+				}
+			}
+		}
+		return Count;
+	}
+
+	float TargetDraw(AFGCentralStorageContainer* Building)
+	{
+		const UFGPowerInfoComponent* Power = Building ? Building->GetPowerInfo() : nullptr;
+		return Power ? Power->GetTargetConsumption() : -1.0f;
+	}
+
+	FName SwatchName(AFGBuildable* Building)
+	{
+		const TSubclassOf<UFGFactoryCustomizationDescriptor_Swatch> Swatch = Building ? Building->GetCustomizationData_Native().SwatchDesc : nullptr;
+		return Swatch ? Swatch->GetFName() : NAME_None;
+	}
+
+	void RegressionFinish(UWorld* World)
+	{
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Regression RESULT: %s (%d of %d checks failed)"), GRegression.Failed == 0 && GRegression.Checks > 0 ? TEXT("PASS") : TEXT("FAIL"),
+			GRegression.Failed, GRegression.Checks);
+		After(World, 1.0f, [](UWorld*) { FScreenshotRequest::RequestScreenshot(TEXT("SinkingDepotShowcase_regression_done.png"), false, false); });
+	}
+
+	/** Step 4: belt-side sinking while the uploader can't keep up (the setting must be on, its default). */
+	void RegressionCantKeepUp(UWorld* World, const TWeakObjectPtr<AFGCentralStorageContainer> WeakB)
+	{
+		AFGCentralStorageContainer* B = WeakB.Get();
+		AFGCentralStorageSubsystem* Depot = AFGCentralStorageSubsystem::Get(World);
+		UClass* Rod = LoadClass<UFGItemDescriptor>(nullptr, IronRodPath);
+		UClass* Mercer = LoadClass<UFGItemDescriptor>(nullptr, MercerSpherePath);
+		UFGInventoryComponent* Buffer = B ? B->GetStorageInventory() : nullptr;
+		if (!Buffer || !Depot || !Rod || !Mercer)
+		{
+			GRegression.Check(TEXT("4 setup"), false, TEXT("building B, depot, Iron Rod or Mercer Sphere class missing"));
+			RegressionFinish(World);
+			return;
+		}
+		const SinkingDepot::Overflow::FRuntime& Runtime = SinkingDepot::Overflow::Runtime();
+		GRegression.Check(TEXT("4 setting on"), Runtime.bSinkWhenUploaderCantKeepUp.load(), TEXT("SinkWhenUploaderCantKeepUp must be on (the default) for this step"));
+		const TSubclassOf<UFGItemDescriptor> MercerItem(Mercer);
+		const int32 Space = Depot->GetCentralStorageItemLimit(MercerItem) - Depot->GetNumItemsFromCentralStorage(MercerItem);
+		const int32 Uploaded = FillDepot(World, MercerItem, Space);
+		const int32 Filled = Buffer->AddStack(FInventoryStack(100000, MercerItem), true);
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Regression 4: %d Mercer Spheres into the depot (now %d of %d), %d into B's buffer"), Uploaded,
+			Depot->GetNumItemsFromCentralStorage(MercerItem), Depot->GetCentralStorageItemLimit(MercerItem), Filled);
+		After(World, 2.0f, [WeakB, Rod, Mercer](UWorld* W)
+		{
+			AFGCentralStorageContainer* B2 = WeakB.Get();
+			UFGInventoryComponent* Buffer2 = B2 ? B2->GetStorageInventory() : nullptr;
+			const bool bBlocked = Buffer2 && !Buffer2->HasEnoughSpaceForItem(FInventoryItem(Rod));
+			GRegression.Check(TEXT("4 buffer stays full"), bBlocked, FString::Printf(TEXT("%d Mercer Spheres still in B's buffer"),
+				Buffer2 ? Buffer2->GetNumItems(TSubclassOf<UFGItemDescriptor>(Mercer)) : -1));
+			if (!bBlocked)
+			{
+				RegressionFinish(W);
+				return;
+			}
+			const SinkingDepot::Overflow::FRuntime& R = SinkingDepot::Overflow::Runtime();
+			const int64 CantBefore = R.SunkCantKeepUp.load();
+			const int64 LostBefore = R.Lost.load() + R.ReturnedToBuffer.load();
+			BuildBeltInto(W, B2, TEXT("regression"), [WeakB, CantBefore, LostBefore, WeakWorld = TWeakObjectPtr<UWorld>(W)]()
+			{
+				UWorld* W3 = WeakWorld.Get();
+				if (!W3)
+				{
+					return;
+				}
+				const SinkingDepot::Overflow::FRuntime& R2 = SinkingDepot::Overflow::Runtime();
+				const int64 Sunk = R2.SunkCantKeepUp.load() - CantBefore;
+				const int64 Lost = R2.Lost.load() + R2.ReturnedToBuffer.load() - LostBefore;
+				const UFGFactoryConnectionComponent* Input = WeakB.IsValid() ? FindInput(WeakB.Get()) : nullptr;
+				GRegression.Check(TEXT("4 belt connected"), Input && Input->IsConnected(), TEXT("belt built into B with the build gun"));
+				GRegression.Check(TEXT("4 sunk off the belt"), Sunk > 0, FString::Printf(TEXT("%lld Iron Rod sunk because the uploader had no room"), Sunk));
+				GRegression.Check(TEXT("4 nothing lost"), Lost == 0, FString::Printf(TEXT("%lld returned or lost after leaving the belt"), Lost));
+				RegressionFinish(W3);
+			}, true, Rod);
+		});
+	}
+
+	void Regression(UWorld* World)
+	{
+		GRegression = FRegression();
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		ASinkingDepotSubsystem* Subsystem = ASinkingDepotSubsystem::Get(World);
+		AFGSchematicManager* Schematics = AFGSchematicManager::Get(World);
+		if (!Player || !Subsystem || !Schematics)
+		{
+			GRegression.Check(TEXT("setup"), false, TEXT("player, subsystem or schematic manager missing"));
+			RegressionFinish(World);
+			return;
+		}
+		Schematics->GiveAccessToSchematic(Subsystem->GetDepotResearch(), nullptr, ESchematicUnlockFlags::BlockTelemetry);
+		const FRotator View(0.0f, Controller->GetControlRotation().Yaw, 0.0f);
+		const FVector Anchor = FindGround(World, Player->GetActorLocation(), 200000.0f) + View.Vector() * 3000.0f;
+		const FVector Right = FRotationMatrix(View).GetUnitAxis(EAxis::Y);
+		UClass* Ours = LoadClass<AFGBuildable>(nullptr, BuildClassPath);
+		AFGCentralStorageContainer* A = Cast<AFGCentralStorageContainer>(SpawnOnGround(World, Ours, Anchor - Right * 1600.0f, View.Yaw + 180.0f));
+		AFGBuildable* V = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, VanillaBuildClassPath), Anchor, View.Yaw + 180.0f);
+		AFGCentralStorageContainer* B = Cast<AFGCentralStorageContainer>(SpawnOnGround(World, Ours, Anchor + Right * 3500.0f, View.Yaw + 180.0f));
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Regression: spawned A %s, V %s, B %s"), *GetNameSafe(A), *GetNameSafe(V), *GetNameSafe(B));
+		const TWeakObjectPtr<AFGCentralStorageContainer> WeakA(A), WeakB(B);
+		const TWeakObjectPtr<AFGBuildable> WeakV(V);
+
+		// 1. After the build effects (as in the showcase).
+		After(World, 12.0f, [WeakA, WeakB, WeakV](UWorld* W)
+		{
+			AFGCentralStorageContainer* A1 = WeakA.Get();
+			AFGBuildable* V1 = WeakV.Get();
+			if (!A1 || !V1 || !WeakB.IsValid())
+			{
+				GRegression.Check(TEXT("1 spawn"), false, TEXT("a test building is missing"));
+				RegressionFinish(W);
+				return;
+			}
+			UFGPowerInfoComponent* Info = A1->GetPowerInfo();
+			TInlineComponentArray<UFGPowerConnectionComponent*> Connections(A1);
+			bool bLinked = Info && Connections.Num() > 0;
+			for (const UFGPowerConnectionComponent* Connection : Connections)
+			{
+				bLinked &= Connection && Connection->GetPowerInfo() == Info;
+			}
+			GRegression.Check(TEXT("1 power connector linked"), bLinked, FString::Printf(TEXT("%d connector(s), power info %s"), Connections.Num(), Info ? TEXT("present") : TEXT("missing")));
+			float Speed = -1.0f;
+			const int32 Grinders = CountGrinders(A1, Speed);
+			GRegression.Check(TEXT("1 grinder window"), Grinders > 0 && Speed == 0.0f, FString::Printf(TEXT("%d grinder slot(s), Speed %.1f"), Grinders, Speed));
+			static const FName Custom(TEXT("SwatchDesc_Custom_C"));
+			GRegression.Check(TEXT("1 default paint"), SwatchName(A1) == Custom, SwatchName(A1).ToString());
+			float VanillaSpeed = -1.0f;
+			GRegression.Check(TEXT("1 vanilla untouched"), CountGrinders(V1, VanillaSpeed) == 0 && SwatchName(V1) != Custom,
+				FString::Printf(TEXT("grinder slots %d, swatch %s"), CountGrinders(V1, VanillaSpeed), *SwatchName(V1).ToString()));
+
+			// 2. Depot full, from the buffer.
+			AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(W);
+			AFGCentralStorageSubsystem* Depot = AFGCentralStorageSubsystem::Get(W);
+			UClass* PlateClass = LoadClass<UFGItemDescriptor>(nullptr, IronPlatePath);
+			if (!Sink || !Depot || !PlateClass)
+			{
+				GRegression.Check(TEXT("2 setup"), false, TEXT("sink, depot or Iron Plate class missing"));
+				RegressionFinish(W);
+				return;
+			}
+			const TSubclassOf<UFGItemDescriptor> Plate(PlateClass);
+			FillDepot(W, Plate, Depot->GetCentralStorageItemLimit(Plate) - Depot->GetNumItemsFromCentralStorage(Plate));
+			int32 Points = 0;
+			EResourceSinkTrack Track = EResourceSinkTrack::RST_Default;
+			Sink->FindResourceSinkPointsForItem(Plate, Points, Track);
+			const int64 PointsBefore = Sink->GetNumTotalPoints(EResourceSinkTrack::RST_Default);
+			const int64 SunkBefore = SinkingDepot::Overflow::Runtime().SunkDepotFull.load();
+			const int32 Added = A1->GetStorageInventory()->AddStack(FInventoryStack(50, Plate), true);
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Regression 2: depot %d of %d Iron Plate, %d put into A, %d points each"),
+				Depot->GetNumItemsFromCentralStorage(Plate), Depot->GetCentralStorageItemLimit(Plate), Added, Points);
+			After(W, 0.8f, [WeakA](UWorld* W2)
+			{
+				AFGCentralStorageContainer* A2 = WeakA.Get();
+				const ASinkingDepotSubsystem* S = ASinkingDepotSubsystem::Get(W2);
+				float Speed2 = -1.0f;
+				CountGrinders(A2, Speed2);
+				GRegression.Check(TEXT("2 grinder runs"), S && S->IsGrinderActive(A2) && Speed2 == SinkingDepot::GrinderActiveSpeed,
+					FString::Printf(TEXT("active %d, Speed %.1f"), S && S->IsGrinderActive(A2), Speed2));
+				GRegression.Check(TEXT("2 no power draw"), TargetDraw(A2) == 0.0f, FString::Printf(TEXT("target %.1f MW with the power option off"), TargetDraw(A2)));
+			});
+			const TWeakObjectPtr<AFGResourceSinkSubsystem> WeakSink(Sink);
+			After(W, 5.0f, [WeakA, WeakB, WeakSink, Plate, Added, Points, PointsBefore, SunkBefore](UWorld* W2)
+			{
+				AFGCentralStorageContainer* A2 = WeakA.Get();
+				AFGResourceSinkSubsystem* S = WeakSink.Get();
+				const int64 Gained = S ? S->GetNumTotalPoints(EResourceSinkTrack::RST_Default) - PointsBefore : -1;
+				const int64 Sunk = SinkingDepot::Overflow::Runtime().SunkDepotFull.load() - SunkBefore;
+				const int32 Left = A2 && A2->GetStorageInventory() ? A2->GetStorageInventory()->GetNumItems(Plate) : -1;
+				GRegression.Check(TEXT("2 exact points"), Added == 50 && Sunk == Added && Left == 0 && Gained == static_cast<int64>(Added) * Points,
+					FString::Printf(TEXT("sunk %lld of %d, %d left, points %lld, expected %lld"), Sunk, Added, Left, Gained, static_cast<int64>(Added) * Points));
+				float Speed2 = -1.0f;
+				CountGrinders(A2, Speed2);
+				const ASinkingDepotSubsystem* Sub = ASinkingDepotSubsystem::Get(W2);
+				GRegression.Check(TEXT("2 grinder stops"), Sub && !Sub->IsGrinderActive(A2) && Speed2 == 0.0f,
+					FString::Printf(TEXT("active %d, Speed %.1f"), Sub && Sub->IsGrinderActive(A2), Speed2));
+
+				// 3. Power option on, unwired: blocked. In memory only, restored afterwards.
+				SinkingDepot::Overflow::FRuntime& R = SinkingDepot::Overflow::Runtime();
+				const bool bOriginal = R.bRequirePower.load();
+				R.bRequirePower.store(true);
+				After(W2, 1.0f, [WeakA, WeakB, Plate, bOriginal](UWorld* W3)
+				{
+					AFGCentralStorageContainer* A3 = WeakA.Get();
+					const int64 SunkBefore3 = SinkingDepot::Overflow::Runtime().SunkDepotFull.load();
+					const int32 Added3 = A3 ? A3->GetStorageInventory()->AddStack(FInventoryStack(50, Plate), true) : 0;
+					After(W3, 3.0f, [WeakA, WeakB, Plate, bOriginal, SunkBefore3, Added3](UWorld* W4)
+					{
+						AFGCentralStorageContainer* A4 = WeakA.Get();
+						SinkingDepot::Overflow::FRuntime& R4 = SinkingDepot::Overflow::Runtime();
+						const int64 Sunk4 = R4.SunkDepotFull.load() - SunkBefore3;
+						const int32 Left4 = A4 ? A4->GetStorageInventory()->GetNumItems(Plate) : -1;
+						GRegression.Check(TEXT("3 unpowered blocks"), Added3 == 50 && Sunk4 == 0 && Left4 == 50 && SinkingDepot::Overflow::IsBlockedByPower(A4) && TargetDraw(A4) == 0.0f,
+							FString::Printf(TEXT("sunk %lld, %d of %d left, blocked %d, target %.1f MW"), Sunk4, Left4, Added3, SinkingDepot::Overflow::IsBlockedByPower(A4), TargetDraw(A4)));
+						R4.bRequirePower.store(false);
+						After(W4, 3.0f, [WeakA, WeakB, Plate, bOriginal, SunkBefore3, Added3](UWorld* W5)
+						{
+							AFGCentralStorageContainer* A5 = WeakA.Get();
+							SinkingDepot::Overflow::FRuntime& R5 = SinkingDepot::Overflow::Runtime();
+							const int64 Sunk5 = R5.SunkDepotFull.load() - SunkBefore3;
+							const int32 Left5 = A5 ? A5->GetStorageInventory()->GetNumItems(Plate) : -1;
+							GRegression.Check(TEXT("3 power option off sinks"), Sunk5 == Added3 && Left5 == 0 && TargetDraw(A5) == 0.0f,
+								FString::Printf(TEXT("sunk %lld of %d, %d left, target %.1f MW"), Sunk5, Added3, Left5, TargetDraw(A5)));
+							R5.bRequirePower.store(bOriginal);
+							RegressionCantKeepUp(W5, WeakB);
+						});
+					});
+				});
+			});
+		});
 	}
 }
 
@@ -1323,6 +2330,30 @@ void SinkingDepot::Dev::OnWorldReady(UWorld* World)
 				MenuCheck(W);
 			}
 		}), 35.0f, false);
+	}
+
+	// After the dev kit (20 s). -SinkingDepotBeltCheck includes the icon renders; -SinkingDepotIconRender does only those.
+	if (World && (FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotBeltCheck")) || FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotIconRender"))))
+	{
+		const bool bBelt = FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotBeltCheck"));
+		After(World, 30.0f, [bBelt](UWorld* W)
+		{
+			if (bBelt)
+			{
+				BeltCheck(W);
+			}
+			else
+			{
+				IconRenderOnly(W);
+			}
+		});
+	}
+
+	// Self-checking regression run for releases (no other flags needed); see Regression().
+	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotRegression")))
+	{
+		UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotRegression: starting in 30 s"));
+		After(World, 30.0f, [](UWorld* W) { Regression(W); });
 	}
 
 	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotDevBuild")))

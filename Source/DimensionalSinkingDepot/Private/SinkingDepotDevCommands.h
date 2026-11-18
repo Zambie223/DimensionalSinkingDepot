@@ -21,6 +21,8 @@ namespace SinkingDepot::Dev
 	 * - -SinkingDepotDevBuild: builds one with the real build gun.
 	 * - -SinkingDepotMenuCheck: opens the build menu and searches for the building.
 	 * - -SinkingDepotServerShowcase: on a dedicated server, spawns the showcase once a player has joined.
+	 * - -SinkingDepotRegression: self-checking run over the shipping code paths (PASS/FAIL lines in the log).
+	 * - -SinkingDepotBeltCheck / -SinkingDepotIconRender: belt build diagnostics and build-gun icon renders.
 	 */
 	void OnWorldReady(UWorld* World);
 

@@ -4,15 +4,22 @@
 
 class AActor;
 class AFGBuildable;
+class AFGCentralStorageContainer;
 
 namespace SinkingDepot::Window
 {
 	/**
-	 * Installs after-hooks on AFGCentralStorageContainer::BeginPlay and AFGBuildableFactory::OnBuildEffectFinished
-	 * (packaged game only) that give our building its grinder window. The second hook matters because the build
-	 * effect swaps materials while it plays and may restore the originals when it finishes.
+	 * Installs after-hooks (packaged game only) on AFGBuildableFactory::OnBuildEffectFinished, which re-applies the
+	 * grinder window because the build effect swaps materials while it plays and may restore the originals when it
+	 * finishes, and on PostLoadGame, which marks buildings from a save so the default paint skips them.
 	 */
 	void InstallHooks();
+
+	/**
+	 * Everyone, from the module's single BeginPlay hook; Building must be a Sinking Depot. Gives it the grinder window,
+	 * and on the server schedules the default paint for a newly placed building.
+	 */
+	void OnBuildingBeginPlay(AFGCentralStorageContainer* Building);
 
 	/**
 	 * Replaces the building's window material (vanilla MM_Window_CC) with a dynamic instance of the mod's grinder

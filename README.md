@@ -66,7 +66,14 @@ On a dedicated server, run these from the Server Manager console:
 
 ## Status
 
-Version 0.1.0 is the first release. It has been tested on a Windows dedicated server with a large factory (660 uploaders), together with a mod that changes the Depot's upload speed and stack limit. The tests covered:
+Version 0.1.1 changes the build menu icon to a render of the building and makes small performance improvements (see [CHANGELOG.md](CHANGELOG.md)). Before release, it passed an automated in-game check in a hosted game on Windows:
+- the building's setup when placed: power connector, grinder window and default paint, with a normal uploader left unchanged
+- exact AWESOME Sink points when the Depot is full
+- the grinder starting and stopping
+- the power setting blocking sinking without power, and sinking freely when off
+- sinking straight off a belt when the building can't keep up, with nothing lost
+
+The results below are from version 0.1.0, the first release. It was tested on a Windows dedicated server with a large factory (660 uploaders), together with a mod that changes the Depot's upload speed and stack limit. The tests covered:
 - sinking when the Depot is full, and when the building can't keep up
 - the setting switched on and off at runtime
 - unsinkable items being left alone

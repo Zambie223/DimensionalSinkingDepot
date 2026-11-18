@@ -79,31 +79,6 @@ namespace SinkingDepot::Overflow
 		}
 
 		/**
-		 * Our building adds a power connector the vanilla uploader doesn't have. Link it to the building's existing
-		 * power info (every factory has one) if nothing else did, so wires attach to this building's consumption.
-		 */
-		void LinkPowerConnections(AFGCentralStorageContainer* Self)
-		{
-			if (!SinkingDepot::IsSinkingDepot(Self))
-			{
-				return;
-			}
-			UFGPowerInfoComponent* Power = Self->GetPowerInfo();
-			TInlineComponentArray<UFGPowerConnectionComponent*> Connections(Self);
-			for (UFGPowerConnectionComponent* Connection : Connections)
-			{
-				if (Connection && Power && !Connection->GetPowerInfo())
-				{
-					Connection->SetPowerInfo(Power);
-				}
-			}
-			if (!Power && Connections.Num() > 0)
-			{
-				UE_LOG(LogSinkingDepot, Warning, TEXT("%s has a power connector but no power info; it can't use power"), *Self->GetName());
-			}
-		}
-
-		/**
 		 * The AWESOME Sink only takes items that can be discarded and are worth at least 1 point (per AddPoints_ThreadSafe's
 		 * documentation). Checking first means unsinkable items are never offered, so the game's "could not sink" notice
 		 * never fires and they simply stay in the uploader like vanilla.
@@ -134,6 +109,10 @@ namespace SinkingDepot::Overflow
 			const int32 Size = Inventory->GetSizeLinear();
 			for (int32 Index = 0; Index < Size; ++Index)
 			{
+				if (Inventory->IsIndexEmpty_Unsafe(Index)) // Index < GetSizeLinear(); skips copying empty slots.
+				{
+					continue;
+				}
 				FInventoryStack Stack;
 				if (!Inventory->GetStackFromIndex(Index, Stack) || !Stack.HasItems())
 				{
@@ -254,14 +233,35 @@ namespace SinkingDepot::Overflow
 				RecordSinking(Self);
 			}
 			// Like a machine, it draws power while working: while sinking, plus a short hold so gaps don't flicker.
-			const bool bWorking = Sunk > 0 || SankWithin(Self, PowerHoldSeconds);
-			SetDraw(Power, bRequirePower && bWorking ? GRuntime.PowerMW.load(std::memory_order_relaxed) : 0.0f);
+			// bRequirePower goes first so the shared activity lock is only taken when power is actually required
+			// (factory ticks run in parallel, and this runs every tick for every Sinking Depot).
+			const bool bWorking = bRequirePower && (Sunk > 0 || SankWithin(Self, PowerHoldSeconds));
+			SetDraw(Power, bWorking ? GRuntime.PowerMW.load(std::memory_order_relaxed) : 0.0f);
 		}
 	}
 
 	FRuntime& Runtime()
 	{
 		return GRuntime;
+	}
+
+	void OnBuildingBeginPlay(AFGCentralStorageContainer* Building)
+	{
+		// Our building adds a power connector the vanilla uploader doesn't have. Link it to the building's existing
+		// power info (every factory has one) if nothing else did, so wires attach to this building's consumption.
+		UFGPowerInfoComponent* Power = Building->GetPowerInfo();
+		TInlineComponentArray<UFGPowerConnectionComponent*> Connections(Building);
+		for (UFGPowerConnectionComponent* Connection : Connections)
+		{
+			if (Connection && Power && !Connection->GetPowerInfo())
+			{
+				Connection->SetPowerInfo(Power);
+			}
+		}
+		if (!Power && Connections.Num() > 0)
+		{
+			UE_LOG(LogSinkingDepot, Warning, TEXT("%s has a power connector but no power info; it can't use power"), *Building->GetName());
+		}
 	}
 
 	bool IsBlockedByPower(const AActor* Building)
@@ -328,12 +328,7 @@ namespace SinkingDepot::Overflow
 			{
 				OnFactoryTick(Self);
 			});
-		SUBSCRIBE_METHOD_VIRTUAL_AFTER(AFGCentralStorageContainer::BeginPlay, GetMutableDefault<AFGCentralStorageContainer>(),
-			[](AFGCentralStorageContainer* Self)
-			{
-				LinkPowerConnections(Self);
-			});
-		UE_LOG(LogSinkingDepot, Log, TEXT("Installed the uploader factory tick and power hooks"));
+		UE_LOG(LogSinkingDepot, Log, TEXT("Installed the uploader factory tick hook"));
 #endif
 	}
 }
