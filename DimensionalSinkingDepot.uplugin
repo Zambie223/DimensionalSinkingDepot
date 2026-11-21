@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
 	"Version": 0,
-	"VersionName": "0.1.1",
-	"SemVersion": "0.1.1",
-	"GameVersion": ">=517554",
+	"VersionName": "0.1.2",
+	"SemVersion": "0.1.2",
+	"GameVersion": ">=520140",
 	"FriendlyName": "Dimensional Sinking Depot",
 	"Description": "A Dimensional Depot Uploader that sends overflow into the AWESOME Sink for points instead of backing up the belt. Unlocks with the Dimensional Depot research.",
 	"Category": "Modding",
@@ -27,7 +27,7 @@
 		{
 			"Name": "SML",
 			"Enabled": true,
-			"SemVersion": "^3.12.0"
+			"SemVersion": "^3.12.1"
 		}
 	]
 }

@@ -2,6 +2,11 @@
 
 Changes made after the first public release are listed here.
 
+## 0.1.2
+
+### Fixed
+- Works with Satisfactory 1.2.5.1 (build 520140) and SML 3.12.1. Game update 1.2.5.1 changed the memory layout of the building this mod extends, so 0.1.1 read the wrong data on that game version and would very likely crash when loading a save with a Dimensional Sinking Depot. 0.1.2 is built for the new layout. It needs game build 520140 or newer and SML 3.12.1 or newer.
+
 ## 0.1.1
 
 ### Changed

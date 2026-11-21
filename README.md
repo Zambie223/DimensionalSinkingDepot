@@ -14,7 +14,7 @@ A normal uploader stops taking items when the Dimensional Depot is full for that
 
 ## Installation
 
-You need Satisfactory 1.2 (build 517554 or newer) with Satisfactory Mod Loader (SML) 3.12 or newer installed.
+You need Satisfactory 1.2.5.1 (build 520140 or newer) with Satisfactory Mod Loader (SML) 3.12.1 or newer installed.
 
 The easiest way is [Satisfactory Mod Manager](https://smm.ficsit.app/): search for **Dimensional Sinking Depot** and install it. Its page on the Satisfactory Mod Repository is [ficsit.app/mod/DimensionalSinkingDepot](https://ficsit.app/mod/DimensionalSinkingDepot).
 
@@ -68,7 +68,11 @@ On a dedicated server, run these from the Server Manager console:
 
 ## Status
 
-Version 0.1.1 changes the build menu icon to a render of the building and makes small performance improvements (see [CHANGELOG.md](CHANGELOG.md)). Before release, it passed an automated in-game check in a hosted game on Windows:
+Version 0.1.2 makes the mod work with Satisfactory 1.2.5.1 and SML 3.12.1. That game update changed the layout of the building this mod extends, so 0.1.1 crashes there when a save contains a Dimensional Sinking Depot (see [CHANGELOG.md](CHANGELOG.md)). On 1.2.5.1, before release, 0.1.2 passed:
+- the automated in-game check below, in a hosted game on Windows
+- a check on a Windows and on a Linux dedicated server: sinking for exactly the AWESOME Sink's points, with a joined client seeing the buildings, their paint and the running grinder
+
+Version 0.1.1 changed the build menu icon to a render of the building and made small performance improvements. The automated in-game check covers:
 - the building's setup when placed: power connector, grinder window and default paint, with a normal uploader left unchanged
 - exact AWESOME Sink points when the Depot is full
 - the grinder starting and stopping
