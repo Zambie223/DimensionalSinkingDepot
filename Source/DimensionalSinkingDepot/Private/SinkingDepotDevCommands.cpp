@@ -3017,6 +3017,11 @@ void SinkingDepot::Dev::OnWorldReady(UWorld* World)
 		ServerShowcasePoll(World, 0);
 	}
 
+	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotUIProbe")))
+	{
+		UIProbe(World);
+	}
+
 	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotMenuCheck")))
 	{
 		// After the dev kit (20 s) has unlocked the building.

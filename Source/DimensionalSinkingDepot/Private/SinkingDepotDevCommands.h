@@ -31,4 +31,11 @@ namespace SinkingDepot::Dev
 	 * replicate, then logs what this client sees (unlock, paint, grinder state) and takes screenshots.
 	 */
 	void OnClientWorldReady(UWorld* World);
+
+	/**
+	 * -SinkingDepotUIProbe (SinkingDepotUIProbe.cpp), single player or host: 35 s in, logs ("[uiprobe]") the layout,
+	 * properties and functions of the uploader, AWESOME Sink and station panels and the shared window frame, then
+	 * opens a Sinking Depot's and an AWESOME Sink's panel and logs their live trees, with screenshots.
+	 */
+	void UIProbe(UWorld* World);
 }
