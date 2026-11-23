@@ -74,3 +74,6 @@ Plugins/*/Intermediate/*
 DerivedDataCache/*
 # Internal changelog (full detail, never published)
 CHANGELOG.internal.md
+
+# Python bytecode from running Tools scripts
+__pycache__/

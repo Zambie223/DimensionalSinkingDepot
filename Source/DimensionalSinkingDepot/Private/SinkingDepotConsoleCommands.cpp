@@ -3,10 +3,38 @@
 #include "HAL/IConsoleManager.h"
 #include "Engine/World.h"
 #include "SinkingDepotConstants.h"
+#include "SinkingDepotConvert.h"
 #include "SinkingDepotSubsystem.h"
 
 namespace
 {
+	/** Console output is only valid while the command runs; SinkingDepot::Convert sends later lines to the log instead. */
+	SinkingDepot::Convert::FReporter ConsoleReporter(FOutputDevice& Ar)
+	{
+		SinkingDepot::Convert::FReporter Reporter;
+		Reporter.bCanSayLater = false;
+		Reporter.Say = [&Ar](const FString& Line) { Ar.Log(Line); };
+		return Reporter;
+	}
+
+	const SinkingDepot::Convert::FCommandNames ConsoleNames{TEXT("SinkingDepot.ConvertAll"), TEXT("SinkingDepot.UndoConvert")};
+
+	FAutoConsoleCommandWithWorldArgsAndOutputDevice GConvertAllCommand(
+		TEXT("SinkingDepot.ConvertAll"),
+		TEXT("SinkingDepot.ConvertAll [confirm backup|confirm nobackup] - turns every Dimensional Sinking Depot into a vanilla Dimensional Depot Uploader, so the mod can be removed (host or server)."),
+		FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+		{
+			SinkingDepot::Convert::RunConvert(World, Args, ConsoleNames, ConsoleReporter(Ar));
+		}));
+
+	FAutoConsoleCommandWithWorldArgsAndOutputDevice GUndoConvertCommand(
+		TEXT("SinkingDepot.UndoConvert"),
+		TEXT("SinkingDepot.UndoConvert [confirm] - turns the uploaders from the last SinkingDepot.ConvertAll back into Dimensional Sinking Depots (host or server)."),
+		FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+		{
+			SinkingDepot::Convert::RunUndo(World, Args, ConsoleNames, ConsoleReporter(Ar));
+		}));
+
 	FAutoConsoleCommandWithWorldArgsAndOutputDevice GStatusCommand(
 		TEXT("SinkingDepot.Status"),
 		TEXT("SinkingDepot.Status - shows the Dimensional Sinking Depot setting in effect, the unlock state and how much has been sunk."),

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FGSaveInterface.h"
+#include "SinkingDepotConvertTypes.h"
 #include "Subsystem/ModSubsystem.h"
 #include "Templates/SubclassOf.h"
 #include "SinkingDepotSubsystem.generated.h"
@@ -18,10 +20,12 @@ class UFGSchematic;
  * - Grants the mod's schematic whenever the vanilla Dimensional Depot research is purchased, including saves that
  *   already had it before the mod was installed.
  * - Publishes which Sinking Depots are sinking right now (ActiveSinkers), for the grinder window.
+ * - Holds the undo record of the last "convert to vanilla uploaders" command. The subsystem is saved only while that
+ *   record exists, so worlds that never used the command carry nothing of this mod outside its buildings.
  * Everyone (except a dedicated server, which draws nothing): turns grinder windows on and off from ActiveSinkers.
  */
 UCLASS()
-class DIMENSIONALSINKINGDEPOT_API ASinkingDepotSubsystem : public AModSubsystem
+class DIMENSIONALSINKINGDEPOT_API ASinkingDepotSubsystem : public AModSubsystem, public IFGSaveInterface
 {
 	GENERATED_BODY()
 
@@ -55,6 +59,22 @@ public:
 	void SetForcedActive(AActor* Building, bool bForced);
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	// IFGSaveInterface: saved only while there is something to undo.
+	virtual void PreSaveGame_Implementation(int32 SaveVersion, int32 GameVersion) override {}
+	virtual void PostSaveGame_Implementation(int32 SaveVersion, int32 GameVersion) override {}
+	virtual void PreLoadGame_Implementation(int32 SaveVersion, int32 GameVersion) override {}
+	virtual void PostLoadGame_Implementation(int32 SaveVersion, int32 GameVersion) override;
+	virtual void GatherDependencies_Implementation(TArray<UObject*>& OutDependentObjects) override {}
+	virtual bool NeedTransform_Implementation() override { return false; }
+	virtual bool ShouldSave_Implementation() const override { return !UndoRecords.IsEmpty(); }
+
+	/** Server: the undo record of the last conversion (empty if there is nothing to undo). */
+	const TArray<FSinkingDepotConvertRecord>& GetUndoRecords() const { return UndoRecords; }
+	void SetUndoRecords(TArray<FSinkingDepotConvertRecord>&& Records) { UndoRecords = MoveTemp(Records); }
+
+	/** Server: the last convert or undo summary, shown by SinkingDepot.Status (a backup save finishes after the command returns). */
+	void SetLastConvertResult(const FString& Summary) { LastConvertResult = Summary; }
 
 protected:
 	virtual void Init() override;
@@ -94,6 +114,12 @@ private:
 
 	UPROPERTY(Transient)
 	TSubclassOf<UFGSchematic> DepotResearch;
+
+	/** Server: what the last convert command changed, for the undo command. Saved (see ShouldSave). */
+	UPROPERTY(SaveGame)
+	TArray<FSinkingDepotConvertRecord> UndoRecords;
+
+	FString LastConvertResult;
 
 	TWeakObjectPtr<UConfigPropertySection> BoundConfigSection;
 	TWeakObjectPtr<AFGSchematicManager> BoundSchematicManager;

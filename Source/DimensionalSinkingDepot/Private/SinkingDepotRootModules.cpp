@@ -2,6 +2,7 @@
 
 #include "Configuration/ModConfiguration.h"
 #include "FGSchematic.h"
+#include "SinkingDepotChatCommand.h"
 #include "SinkingDepotConstants.h"
 #include "SinkingDepotLog.h"
 #include "SinkingDepotSubsystem.h"
@@ -34,6 +35,7 @@ USinkingDepotGameWorldModule::USinkingDepotGameWorldModule()
 {
 	bRootModule = true;
 	ModSubsystems.Add(ASinkingDepotSubsystem::StaticClass());
+	mChatCommands.Add(ASinkingDepotChatCommand::StaticClass());
 }
 
 void USinkingDepotGameWorldModule::DispatchLifecycleEvent(const ELifecyclePhase Phase)

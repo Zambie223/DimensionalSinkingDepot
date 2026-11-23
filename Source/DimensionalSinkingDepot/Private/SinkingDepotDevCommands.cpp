@@ -73,6 +73,17 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "TextureResource.h"
+#include "Async/Async.h"
+#include "SinkingDepotConvert.h"
+#include "SinkingDepotConvertTypes.h"
+#include "Buildables/FGBuildableBlueprintDesigner.h"
+#include "FGBlueprintSubsystem.h"
+#include "FGFactoryBlueprintTypes.h"
+#include "FGPlayerController.h"
+#include "FGSaveSession.h"
+#include "FGSaveSystem.h"
+#include "GameFramework/PlayerStart.h"
+#include "Player/SMLRemoteCallObject.h"
 
 namespace
 {
@@ -2301,8 +2312,692 @@ namespace
 	}
 }
 
+namespace
+{
+	/**
+	 * Checks for "convert to vanilla uploaders" and its undo (SinkingDepotConvert.cpp). Every check logs
+	 * "[dev] ConvertCheck CHECK <name>: PASS|FAIL (<detail>)"; a run ends with "[dev] ConvertCheck RESULT: PASS|FAIL" and
+	 * the screenshot SinkingDepotShowcase_<marker>.png, which the launcher scripts wait for.
+	 *
+	 * -SinkingDepotConvertCheck (single player or listen host), in two parts with a save and reload in between:
+	 *  Part 1: five Sinking Depots: C1 fed directly by a storage container of Iron Plate, C2 wired to a power pole and
+	 *  to C1, C3 painted with swatch slot 5, C4 holding 20 Mercer Spheres (the depot is full of them and the sink refuses
+	 *  them, so they stay put), C5 inside a blueprint designer. Saves SinkingDepot_ConvFixture, then converts through the
+	 *  chat command as the host, undoes through the console command, checks that "convert" without a choice changes
+	 *  nothing, converts with a backup save, saves SinkingDepot_ConvCheck_s1 and loads it.
+	 *  Part 2 (after the reload): the undo record survived; undo through the chat command; convert, dismantle one, undo
+	 *  (skipped); converts again and saves SinkingDepot_ConvFinal for the "load without the mod" test.
+	 * -SinkingDepotConvertHost (listen host) with -SinkingDepotClientConvertTry (joined client): the client's chat
+	 *  command must be refused; then the host's works.
+	 * -SinkingDepotConvertDS (dedicated server): spawns two wired Sinking Depots; the test script drives the console
+	 *  commands through the server API.
+	 */
+	struct FConvertCheck
+	{
+		int32 Checks = 0;
+		int32 Failed = 0;
+		void Check(const TCHAR* Name, const bool bPass, const FString& Detail)
+		{
+			++Checks;
+			Failed += bPass ? 0 : 1;
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck CHECK %s: %s (%s)"), Name, bPass ? TEXT("PASS") : TEXT("FAIL"), *Detail);
+		}
+	};
+	FConvertCheck GConvert;
+
+	/** Survives the save/load travel (module memory): 0 = fresh world, 1 = after the reload. */
+	int32 GConvertPhase = 0;
+	/** Where the test buildings stood, to find whatever stands there after a swap or a reload. */
+	FVector GConvertLoc[5];
+	FVector GConvertPoleLoc;
+	FVector GConvertStorageLoc;
+	FVector GConvertDesignerLoc;
+	FVector GConvertPole2Loc;
+	TArray<FString> GConvertLines;
+
+	constexpr const TCHAR* StorageContainerPath = TEXT("/Game/FactoryGame/Buildable/Factory/StorageContainerMk1/Build_StorageContainerMk1.Build_StorageContainerMk1_C");
+	constexpr const TCHAR* PowerPolePath = TEXT("/Game/FactoryGame/Buildable/Factory/PowerPoleMk1/Build_PowerPoleMk1.Build_PowerPoleMk1_C");
+	constexpr const TCHAR* Slot5SwatchPath = TEXT("/Game/FactoryGame/Buildable/-Shared/Customization/Swatches/SwatchDesc_Slot5.SwatchDesc_Slot5_C");
+	constexpr const TCHAR* DesignerPath = TEXT("/Game/FactoryGame/Buildable/Factory/BlueprintDesigner/Build_BlueprintDesigner.Build_BlueprintDesigner_C");
+	constexpr int32 ConvertMercerCount = 20;
+
+	const SinkingDepot::Convert::FCommandNames ConvertTestNames{TEXT("SinkingDepot.ConvertAll"), TEXT("SinkingDepot.UndoConvert")};
+
+	SinkingDepot::Convert::FReporter CaptureReporter()
+	{
+		SinkingDepot::Convert::FReporter Reporter;
+		Reporter.bCanSayLater = true;
+		Reporter.Say = [](const FString& Line) { GConvertLines.Add(Line); };
+		return Reporter;
+	}
+
+	bool LinesContain(const TCHAR* Text)
+	{
+		return GConvertLines.ContainsByPredicate([Text](const FString& Line) { return Line.Contains(Text); });
+	}
+
+	void ConvertFinish(UWorld* World, const TCHAR* Marker)
+	{
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck RESULT: %s (%d of %d checks failed)"), GConvert.Failed == 0 && GConvert.Checks > 0 ? TEXT("PASS") : TEXT("FAIL"),
+			GConvert.Failed, GConvert.Checks);
+		const FString Shot = FString::Printf(TEXT("SinkingDepotShowcase_%s.png"), Marker);
+		After(World, 1.0f, [Shot](UWorld*) { FScreenshotRequest::RequestScreenshot(Shot, false, false); });
+	}
+
+	UFGFactoryConnectionComponent* FindOutput(AActor* Actor)
+	{
+		TInlineComponentArray<UFGFactoryConnectionComponent*> Connections(Actor);
+		for (UFGFactoryConnectionComponent* Connection : Connections)
+		{
+			if (Connection && Connection->GetDirection() == EFactoryConnectionDirection::FCD_OUTPUT)
+			{
+				return Connection;
+			}
+		}
+		return nullptr;
+	}
+
+	/** The building of this kind standing within 50 cm of Location, or null. */
+	template <typename T>
+	T* BuildingAt(UWorld* World, const FVector& Location, TFunctionRef<bool(T*)> Filter)
+	{
+		for (TActorIterator<T> It(World); It; ++It)
+		{
+			if (!It->IsActorBeingDestroyed() && FVector::Dist(It->GetActorLocation(), Location) < 50.0f && Filter(*It))
+			{
+				return *It;
+			}
+		}
+		return nullptr;
+	}
+
+	AFGCentralStorageContainer* UploaderAt(UWorld* World, const FVector& Location, const bool bSinkingDepot)
+	{
+		return BuildingAt<AFGCentralStorageContainer>(World, Location, [bSinkingDepot](AFGCentralStorageContainer* C) { return SinkingDepot::IsSinkingDepot(C) == bSinkingDepot; });
+	}
+
+	UFGCircuitConnectionComponent* ConvConnector(AActor* Actor)
+	{
+		if (const AFGBuildablePowerPole* Pole = Cast<AFGBuildablePowerPole>(Actor))
+		{
+			return Pole->GetPowerConnections().Num() > 0 ? Pole->GetPowerConnections()[0] : nullptr;
+		}
+		return Actor ? Actor->FindComponentByClass<UFGPowerConnectionComponent>() : nullptr;
+	}
+
+	int32 ConvWireCount(AActor* Actor)
+	{
+		const UFGCircuitConnectionComponent* Found = ConvConnector(Actor);
+		return Found ? Found->GetNumConnections() : -1;
+	}
+
+	bool ConvWire(UWorld* World, AActor* From, AActor* To, AFGBuildableBlueprintDesigner* Designer = nullptr)
+	{
+		AFGBuildableSubsystem* Buildables = AFGBuildableSubsystem::Get(World);
+		UClass* WireClass = LoadClass<AFGBuildableWire>(nullptr, SinkingDepot::PowerLineClassPath);
+		UFGCircuitConnectionComponent* A = ConvConnector(From);
+		UFGCircuitConnectionComponent* B = ConvConnector(To);
+		// Like the build gun: no wire onto a full connector (a Sinking Depot takes one wire, like a machine).
+		if (!Buildables || !WireClass || !A || !B || A->GetNumFreeConnections() <= 0 || B->GetNumFreeConnections() <= 0)
+		{
+			return false;
+		}
+		const FTransform Transform(A->GetComponentLocation());
+		AFGBuildableWire* NewWire = Cast<AFGBuildableWire>(Buildables->BeginSpawnBuildable(WireClass, Transform));
+		if (!NewWire)
+		{
+			return false;
+		}
+		NewWire->SetBuiltWithRecipe(LoadClass<UFGRecipe>(nullptr, SinkingDepot::PowerLineRecipePath));
+		if (Designer)
+		{
+			NewWire->SetInsideBlueprintDesigner(Designer);
+		}
+		const bool bConnected = NewWire->Connect(A, B);
+		NewWire->FinishSpawning(Transform);
+		if (Designer && !Designer->GetBuildablesInBlueprintDesigner().Contains(NewWire))
+		{
+			Designer->OnBuildableConstructedInsideDesigner(NewWire);
+		}
+		return bConnected;
+	}
+
+	int32 ItemsIn(AFGCentralStorageContainer* Building, UClass* Item)
+	{
+		UFGInventoryComponent* Inventory = Building ? Building->GetStorageInventory() : nullptr;
+		return Inventory ? Inventory->GetNumItems(TSubclassOf<UFGItemDescriptor>(Item)) : -1;
+	}
+
+	FName RecipeName(const AFGBuildable* Building)
+	{
+		return Building && Building->GetBuiltWithRecipe() ? Building->GetBuiltWithRecipe()->GetFName() : NAME_None;
+	}
+
+	/** Sends a chat command as the local player, the way SML's chat hook does (server RPC; runs directly on the host). */
+	bool SendChatCommand(UWorld* World, const TCHAR* CommandLine)
+	{
+		AFGPlayerController* Controller = Cast<AFGPlayerController>(World->GetFirstPlayerController());
+		USMLRemoteCallObject* Remote = Controller ? Controller->GetRemoteCallObjectOfClass<USMLRemoteCallObject>() : nullptr;
+		if (!Remote)
+		{
+			return false;
+		}
+		Remote->HandleChatCommand(CommandLine);
+		return true;
+	}
+
+	/** -SinkingDepotConvertBP: saves the test designer as a blueprint through the game's own save RPC (as the UI does). */
+	void SaveTestBlueprint(UWorld* World, const TCHAR* Name)
+	{
+		if (!FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotConvertBP")))
+		{
+			return;
+		}
+		AFGPlayerController* Controller = Cast<AFGPlayerController>(World->GetFirstPlayerController());
+		UFGBlueprintRemoteCallObject* Remote = Controller ? Controller->GetRemoteCallObjectOfClass<UFGBlueprintRemoteCallObject>() : nullptr;
+		AFGBuildableBlueprintDesigner* Designer = BuildingAt<AFGBuildableBlueprintDesigner>(World, GConvertDesignerLoc, [](AFGBuildableBlueprintDesigner*) { return true; });
+		if (!Remote || !Designer)
+		{
+			GConvert.Check(TEXT("blueprint save"), false, TEXT("no blueprint remote call object or designer"));
+			return;
+		}
+		FBlueprintRecord Record;
+		Record.BlueprintName = Name;
+		FBlueprintCategoryRecord Category;
+		Category.CategoryName = TEXT("Undefined");
+		Category.IsUndefined = true;
+		FBlueprintSubCategoryRecord SubCategory;
+		SubCategory.SubCategoryName = TEXT("Undefined");
+		SubCategory.IsUndefined = true;
+		Remote->Server_SaveBlueprintInDesigner(Designer, Controller, Record, Category, SubCategory);
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck: requested blueprint save '%s' (%d building(s) in the designer)"), Name, Designer->GetBuildablesInBlueprintDesigner().Num());
+	}
+
+	/** Saves the game under Name and calls Then (on the game thread) once the file is written. */
+	void SaveThen(UWorld* World, const FString& Name, TFunction<void(UWorld*, bool)> Then)
+	{
+		UFGSaveSession* Session = UFGSaveSession::Get(World);
+		if (!Session)
+		{
+			Then(World, false);
+			return;
+		}
+		const TWeakObjectPtr<UWorld> WeakWorld(World);
+		Session->SaveGame(Name, FOnSaveGameComplete::CreateLambda([WeakWorld, Then](const bool bSuccess, const FText&, void*)
+		{
+			AsyncTask(ENamedThreads::GameThread, [WeakWorld, Then, bSuccess]()
+			{
+				if (UWorld* W = WeakWorld.Get())
+				{
+					After(W, 1.0f, [Then, bSuccess](UWorld* W2) { Then(W2, bSuccess); });
+				}
+			});
+		}), nullptr);
+	}
+
+	/** Facts about the five test spots, for checks after a swap. */
+	struct FConvertState
+	{
+		int32 Ours = 0;
+		int32 Vanilla = 0;
+		AFGCentralStorageContainer* At[5] = {};
+	};
+
+	FConvertState ReadState(UWorld* World, const bool bSinkingDepots)
+	{
+		FConvertState State;
+		State.Ours = GetUploaders(World, true).Num();
+		State.Vanilla = GetUploaders(World, false).Num();
+		for (int32 Index = 0; Index < 5; ++Index)
+		{
+			State.At[Index] = UploaderAt(World, GConvertLoc[Index], bSinkingDepots);
+		}
+		return State;
+	}
+
+	/** Shared checks after a swap; Prefix names the step, bSinkingDepots says what should stand at the five spots. */
+	void CheckSwapped(UWorld* World, const TCHAR* Prefix, const bool bSinkingDepots, const int32 ExpectedWiresOnPole, const bool bWithDesigner)
+	{
+		const FConvertState State = ReadState(World, bSinkingDepots);
+		int32 Present = 0;
+		for (int32 Index = 0; Index < 5; ++Index)
+		{
+			Present += State.At[Index] ? 1 : 0;
+		}
+		const int32 Expected = bWithDesigner ? 5 : 4;
+		GConvert.Check(*FString::Printf(TEXT("%s all swapped"), Prefix), Present >= Expected && (bSinkingDepots ? State.Ours >= Expected : State.Ours == 0),
+			FString::Printf(TEXT("%d of 5 spots hold a %s; %d Sinking Depot(s) and %d vanilla uploader(s) in the world"), Present,
+				bSinkingDepots ? TEXT("Sinking Depot") : TEXT("vanilla uploader"), State.Ours, State.Vanilla));
+
+		const FName WantedRecipe = bSinkingDepots ? FName(TEXT("Recipe_SinkingDepot_C")) : FName(TEXT("Recipe_CentralStorage_C"));
+		bool bRecipes = true;
+		for (int32 Index = 0; Index < 5; ++Index)
+		{
+			bRecipes &= !State.At[Index] || RecipeName(State.At[Index]) == WantedRecipe;
+		}
+		GConvert.Check(*FString::Printf(TEXT("%s built-with recipe"), Prefix), bRecipes, WantedRecipe.ToString());
+
+		AFGBuildable* Storage = BuildingAt<AFGBuildable>(World, GConvertStorageLoc, [](AFGBuildable* B) { return B->IsA<AFGBuildableStorage>() && !B->IsA<AFGCentralStorageContainer>(); });
+		const UFGFactoryConnectionComponent* Input = State.At[0] ? FindInput(State.At[0]) : nullptr;
+		GConvert.Check(*FString::Printf(TEXT("%s belt kept"), Prefix), Input && Storage && Input->GetConnection() == FindOutput(Storage),
+			FString::Printf(TEXT("C1 input connected to %s"), Input && Input->GetConnection() ? *GetNameSafe(Input->GetConnection()->GetOwner()) : TEXT("nothing")));
+
+		AFGBuildable* Pole = BuildingAt<AFGBuildable>(World, GConvertPoleLoc, [](AFGBuildable* B) { return B->IsA<AFGBuildablePowerPole>(); });
+		GConvert.Check(*FString::Printf(TEXT("%s pole wires"), Prefix), ConvWireCount(Pole) == ExpectedWiresOnPole,
+			FString::Printf(TEXT("pole has %d wire(s), expected %d"), ConvWireCount(Pole), ExpectedWiresOnPole));
+		if (bSinkingDepots)
+		{
+			GConvert.Check(*FString::Printf(TEXT("%s depot wires"), Prefix), ConvWireCount(State.At[1]) == 1 && ConvWireCount(State.At[3]) == ExpectedWiresOnPole,
+				FString::Printf(TEXT("C2 has %d wire(s) (to C1), C4 has %d (to the pole), expected 1 and %d"), ConvWireCount(State.At[1]), ConvWireCount(State.At[3]), ExpectedWiresOnPole));
+		}
+		else
+		{
+			GConvert.Check(*FString::Printf(TEXT("%s no power connector"), Prefix), State.At[1] && !ConvConnector(State.At[1]), TEXT("a vanilla uploader has no power connector"));
+		}
+
+		UClass* Mercer = LoadClass<UFGItemDescriptor>(nullptr, MercerSpherePath);
+		GConvert.Check(*FString::Printf(TEXT("%s buffer kept"), Prefix), ItemsIn(State.At[3], Mercer) == ConvertMercerCount || (!State.At[3] && !bWithDesigner),
+			FString::Printf(TEXT("C4 holds %d Mercer Sphere(s), expected %d"), ItemsIn(State.At[3], Mercer), ConvertMercerCount));
+
+		if (bWithDesigner)
+		{
+			AFGBuildableBlueprintDesigner* Designer = BuildingAt<AFGBuildableBlueprintDesigner>(World, GConvertDesignerLoc, [](AFGBuildableBlueprintDesigner*) { return true; });
+			const bool bInside = Designer && State.At[4] && Designer->GetBuildablesInBlueprintDesigner().Contains(State.At[4]) && State.At[4]->GetBlueprintDesigner() == Designer;
+			int32 Stale = 0;
+			if (Designer)
+			{
+				for (const AFGBuildable* Listed : Designer->GetBuildablesInBlueprintDesigner())
+				{
+					Stale += IsValid(Listed) ? 0 : 1;
+				}
+			}
+			AFGBuildable* Pole2 = BuildingAt<AFGBuildable>(World, GConvertPole2Loc, [](AFGBuildable* B) { return B->IsA<AFGBuildablePowerPole>(); });
+			GConvert.Check(*FString::Printf(TEXT("%s designer wire"), Prefix), ConvWireCount(Pole2) == (bSinkingDepots ? 1 : 0),
+				FString::Printf(TEXT("the pole inside the designer has %d wire(s)"), ConvWireCount(Pole2)));
+			GConvert.Check(*FString::Printf(TEXT("%s designer list"), Prefix), bInside && Stale == 0,
+				FString::Printf(TEXT("designer %s, lists %d building(s), %d stale; C5 inside: %d"), Designer ? TEXT("found") : TEXT("MISSING"),
+					Designer ? Designer->GetBuildablesInBlueprintDesigner().Num() : -1, Stale, bInside));
+		}
+	}
+
+	/** Paint is checked a few seconds after a swap, after the "new building" default paint would have run. */
+	void CheckPaintNow(UWorld* World, const FString& Name, const bool bSinkingDepots)
+	{
+		AFGCentralStorageContainer* C3 = UploaderAt(World, GConvertLoc[2], bSinkingDepots);
+		GConvert.Check(*Name, SwatchName(C3) == FName(TEXT("SwatchDesc_Slot5_C")), SwatchName(C3).ToString());
+	}
+
+	void CheckPaintLater(UWorld* World, const TCHAR* Prefix, const bool bSinkingDepots)
+	{
+		const FString Name = FString::Printf(TEXT("%s paint kept"), Prefix);
+		After(World, 4.0f, [Name, bSinkingDepots](UWorld* W) { CheckPaintNow(W, Name, bSinkingDepots); });
+	}
+
+	void ConvertPart2(UWorld* World);
+
+	void ConvertPart1(UWorld* World)
+	{
+		GConvert = FConvertCheck();
+		APlayerController* Controller = nullptr;
+		AFGCharacterPlayer* Player = LocalPlayer(World, Controller);
+		ASinkingDepotSubsystem* Subsystem = ASinkingDepotSubsystem::Get(World);
+		AFGSchematicManager* Schematics = AFGSchematicManager::Get(World);
+		UClass* Ours = LoadClass<AFGBuildable>(nullptr, BuildClassPath);
+		UClass* Mercer = LoadClass<UFGItemDescriptor>(nullptr, MercerSpherePath);
+		UClass* Plate = LoadClass<UFGItemDescriptor>(nullptr, IronPlatePath);
+		if (!Player || !Subsystem || !Schematics || !Ours || !Mercer || !Plate)
+		{
+			GConvert.Check(TEXT("setup"), false, TEXT("player, subsystem, schematic manager or a class missing"));
+			ConvertFinish(World, TEXT("convert_done"));
+			return;
+		}
+		Schematics->GiveAccessToSchematic(Subsystem->GetDepotResearch(), nullptr, ESchematicUnlockFlags::BlockTelemetry);
+		const FRotator View(0.0f, Controller->GetControlRotation().Yaw, 0.0f);
+		const FVector Forward = View.Vector();
+		const FVector Right = FRotationMatrix(View).GetUnitAxis(EAxis::Y);
+		const FVector Anchor = FindGround(World, Player->GetActorLocation(), 200000.0f) + Forward * 3000.0f;
+		AFGCentralStorageContainer* C[4];
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			C[Index] = Cast<AFGCentralStorageContainer>(SpawnOnGround(World, Ours, Anchor + Right * ((Index - 1.5f) * 1500.0f), View.Yaw + 180.0f));
+			GConvertLoc[Index] = C[Index] ? C[Index]->GetActorLocation() : FVector::ZeroVector;
+		}
+		AFGBuildable* Pole = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, PowerPolePath), Anchor + Right * (-750.0f) + Forward * 900.0f, View.Yaw);
+		AFGBuildable* Storage = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, StorageContainerPath), Anchor + Right * (-2250.0f) + Forward * 1200.0f, View.Yaw);
+		AFGBuildable* Designer = SpawnOnGround(World, LoadClass<AFGBuildable>(nullptr, DesignerPath), Anchor + Forward * 7000.0f, View.Yaw);
+		AFGBuildableBlueprintDesigner* DesignerTyped = Cast<AFGBuildableBlueprintDesigner>(Designer);
+		GConvertPoleLoc = Pole ? Pole->GetActorLocation() : FVector::ZeroVector;
+		GConvertStorageLoc = Storage ? Storage->GetActorLocation() : FVector::ZeroVector;
+		GConvertDesignerLoc = Designer ? Designer->GetActorLocation() : FVector::ZeroVector;
+
+		// C5 inside the designer, the way a building placed in a designer is: flagged before BeginPlay, then listed.
+		AFGCentralStorageContainer* C5 = nullptr;
+		if (DesignerTyped)
+		{
+			const FTransform Transform(FRotator(0.0f, View.Yaw, 0.0f), Designer->GetActorLocation() + FVector(0.0f, 0.0f, 150.0f));
+			AFGBuildable* Spawned = AFGBuildableSubsystem::Get(World)->BeginSpawnBuildable(Ours, Transform);
+			if (Spawned)
+			{
+				Spawned->SetInsideBlueprintDesigner(DesignerTyped);
+				Spawned->FinishSpawning(Transform);
+				if (!DesignerTyped->GetBuildablesInBlueprintDesigner().Contains(Spawned))
+				{
+					DesignerTyped->OnBuildableConstructedInsideDesigner(Spawned);
+				}
+				C5 = Cast<AFGCentralStorageContainer>(Spawned);
+			}
+		}
+		GConvertLoc[4] = C5 ? C5->GetActorLocation() : FVector::ZeroVector;
+		if (DesignerTyped)
+		{
+			const FTransform PoleTransform(FRotator(0.0f, View.Yaw, 0.0f), Designer->GetActorLocation() + Right * 700.0f + FVector(0.0f, 0.0f, 150.0f));
+			AFGBuildable* Pole2 = AFGBuildableSubsystem::Get(World)->BeginSpawnBuildable(LoadClass<AFGBuildable>(nullptr, PowerPolePath), PoleTransform);
+			if (Pole2)
+			{
+				Pole2->SetInsideBlueprintDesigner(DesignerTyped);
+				Pole2->FinishSpawning(PoleTransform);
+				if (!DesignerTyped->GetBuildablesInBlueprintDesigner().Contains(Pole2))
+				{
+					DesignerTyped->OnBuildableConstructedInsideDesigner(Pole2);
+				}
+				GConvertPole2Loc = Pole2->GetActorLocation();
+			}
+		}
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck: spawned C1-C4 %s %s %s %s, C5 %s in %s, pole %s, storage %s"), *GetNameSafe(C[0]), *GetNameSafe(C[1]),
+			*GetNameSafe(C[2]), *GetNameSafe(C[3]), *GetNameSafe(C5), *GetNameSafe(Designer), *GetNameSafe(Pole), *GetNameSafe(Storage));
+
+		// Fill and wire after the default paint has run (it is scheduled a moment after BeginPlay).
+		After(World, 4.0f, [Mercer, Plate](UWorld* W)
+		{
+			AFGCentralStorageContainer* C1 = UploaderAt(W, GConvertLoc[0], true);
+			AFGCentralStorageContainer* C2 = UploaderAt(W, GConvertLoc[1], true);
+			AFGCentralStorageContainer* C3 = UploaderAt(W, GConvertLoc[2], true);
+			AFGCentralStorageContainer* C4 = UploaderAt(W, GConvertLoc[3], true);
+			AFGBuildable* Pole1 = BuildingAt<AFGBuildable>(W, GConvertPoleLoc, [](AFGBuildable* B) { return B->IsA<AFGBuildablePowerPole>(); });
+			AFGBuildableStorage* Storage1 = Cast<AFGBuildableStorage>(BuildingAt<AFGBuildable>(W, GConvertStorageLoc, [](AFGBuildable* B) { return B->IsA<AFGBuildableStorage>() && !B->IsA<AFGCentralStorageContainer>(); }));
+			UClass* Slot5 = LoadClass<UFGFactoryCustomizationDescriptor_Swatch>(nullptr, Slot5SwatchPath);
+			if (C3 && Slot5)
+			{
+				FFactoryCustomizationData Paint = C3->GetCustomizationData_Native();
+				Paint.SwatchDesc = Slot5;
+				C3->SetCustomizationData_Native(Paint);
+				C3->ApplyCustomizationData_Native(Paint);
+			}
+			// One wire per Sinking Depot, as in the game: pole to C4, and C1 to C2 (a wire between two converted buildings).
+			const bool bWirePole = ConvWire(W, Pole1, C4);
+			const bool bWireDepots = ConvWire(W, C1, C2);
+			AFGBuildableBlueprintDesigner* Designer1 = BuildingAt<AFGBuildableBlueprintDesigner>(W, GConvertDesignerLoc, [](AFGBuildableBlueprintDesigner*) { return true; });
+			AFGBuildable* Pole2 = BuildingAt<AFGBuildable>(W, GConvertPole2Loc, [](AFGBuildable* B) { return B->IsA<AFGBuildablePowerPole>(); });
+			const bool bWireDesigner = ConvWire(W, UploaderAt(W, GConvertLoc[4], true), Pole2, Designer1);
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck: wire C5-pole inside the designer %d"), bWireDesigner);
+			if (Storage1 && C1)
+			{
+				Storage1->GetStorageInventory()->AddStack(FInventoryStack(200, TSubclassOf<UFGItemDescriptor>(Plate)), true);
+				if (UFGFactoryConnectionComponent* Out = FindOutput(Storage1))
+				{
+					Out->SetConnection(FindInput(C1));
+				}
+			}
+			AFGCentralStorageSubsystem* Depot = AFGCentralStorageSubsystem::Get(W);
+			const TSubclassOf<UFGItemDescriptor> MercerItem(Mercer);
+			if (Depot)
+			{
+				FillDepot(W, MercerItem, Depot->GetCentralStorageItemLimit(MercerItem) - Depot->GetNumItemsFromCentralStorage(MercerItem));
+			}
+			if (C4)
+			{
+				C4->GetStorageInventory()->AddStack(FInventoryStack(ConvertMercerCount, MercerItem), true);
+			}
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck: wires pole-C4 %d, C1-C2 %d; storage fed into C1; %d Mercer Spheres into C4"), bWirePole, bWireDepots, ConvertMercerCount);
+		});
+
+		After(World, 9.0f, [](UWorld* W)
+		{
+			CheckSwapped(W, TEXT("0 setup"), true, 1, true);
+			// Checked now: the paint was set 5 s ago, after the default paint, and the conversion starts before a later check would run.
+			CheckPaintNow(W, TEXT("0 setup paint kept"), true);
+			SaveTestBlueprint(W, TEXT("SinkingDepot_ConvBP_before"));
+			SaveThen(W, TEXT("SinkingDepot_ConvFixture"), [](UWorld* W1o, const bool bSaved)
+			{
+				GConvert.Check(TEXT("0 fixture saved"), bSaved, TEXT("SinkingDepot_ConvFixture"));
+				// 1. Convert through the chat command, as the host. Checked a second later in case the RPC is queued.
+				const bool bSent = SendChatCommand(W1o, TEXT("sinkingdepot convert confirm nobackup"));
+				After(W1o, 1.0f, [bSent](UWorld* W1)
+				{
+				ASinkingDepotSubsystem* S = ASinkingDepotSubsystem::Get(W1);
+				int32 WireEntries = 0;
+				int32 Remapped = 0;
+				for (const FSinkingDepotConvertRecord& Record : S ? S->GetUndoRecords() : TArray<FSinkingDepotConvertRecord>())
+				{
+					for (const FSinkingDepotWireRecord& Entry : Record.Wires)
+					{
+						++WireEntries;
+						Remapped += Entry.bOtherEndConverted && IsValid(Entry.OtherActor) && !SinkingDepot::IsSinkingDepot(Entry.OtherActor) ? 1 : 0;
+					}
+				}
+				GConvert.Check(TEXT("1 chat command as host"), bSent && S && S->GetUndoRecords().Num() == 5,
+					FString::Printf(TEXT("sent %d, %d undo record(s)"), bSent, S ? S->GetUndoRecords().Num() : -1));
+				// pole-C4, C1-C2 (recorded once, on whichever was converted first) and C5-pole inside the designer.
+				GConvert.Check(TEXT("1 wires recorded"), WireEntries == 3 && Remapped == 1, FString::Printf(TEXT("%d wire record(s), %d between two converted buildings"), WireEntries, Remapped));
+				CheckSwapped(W1, TEXT("1 convert"), false, 0, true);
+				CheckPaintLater(W1, TEXT("1 convert"), false);
+				SaveTestBlueprint(W1, TEXT("SinkingDepot_ConvBP_after"));
+				AFGCentralStorageSubsystem* Depot = AFGCentralStorageSubsystem::Get(W1);
+				const TSubclassOf<UFGItemDescriptor> PlateItem(LoadClass<UFGItemDescriptor>(nullptr, IronPlatePath));
+				const int32 PlatesBefore = Depot ? Depot->GetNumItemsFromCentralStorage(PlateItem) : -1;
+				After(W1, 8.0f, [PlatesBefore, PlateItem](UWorld* W2)
+				{
+					AFGCentralStorageSubsystem* Depot2 = AFGCentralStorageSubsystem::Get(W2);
+					const int32 PlatesAfter = Depot2 ? Depot2->GetNumItemsFromCentralStorage(PlateItem) : -1;
+					GConvert.Check(TEXT("1 belt still feeds"), PlatesAfter > PlatesBefore, FString::Printf(TEXT("Iron Plate in the depot %d -> %d"), PlatesBefore, PlatesAfter));
+
+					// 2. Undo through the console command.
+					IConsoleManager::Get().ProcessUserConsoleInput(TEXT("SinkingDepot.UndoConvert confirm"), *GLog, W2);
+					ASinkingDepotSubsystem* S2 = ASinkingDepotSubsystem::Get(W2);
+					GConvert.Check(TEXT("2 undo record cleared"), S2 && S2->GetUndoRecords().IsEmpty(), FString::Printf(TEXT("%d record(s) left"), S2 ? S2->GetUndoRecords().Num() : -1));
+					CheckSwapped(W2, TEXT("2 undo"), true, 1, true);
+					CheckPaintLater(W2, TEXT("2 undo"), true);
+
+					After(W2, 6.0f, [](UWorld* W3)
+					{
+						// 3. Without a choice, or with none at all, nothing happens.
+						GConvertLines.Reset();
+						SinkingDepot::Convert::RunConvert(W3, {TEXT("confirm")}, ConvertTestNames, CaptureReporter());
+						SinkingDepot::Convert::RunConvert(W3, {}, ConvertTestNames, CaptureReporter());
+						SinkingDepot::Convert::RunUndo(W3, {}, ConvertTestNames, CaptureReporter());
+						GConvert.Check(TEXT("3 no choice, no change"), GetUploaders(W3, true).Num() == 5 && LinesContain(TEXT("Nothing was converted yet")) && LinesContain(TEXT("confirm nobackup")),
+							FString::Printf(TEXT("%d Sinking Depot(s); %d line(s) of help"), GetUploaders(W3, true).Num(), GConvertLines.Num()));
+
+						// 4. Convert with a backup save.
+						GConvertLines.Reset();
+						SinkingDepot::Convert::RunConvert(W3, {TEXT("confirm"), TEXT("backup")}, ConvertTestNames, CaptureReporter());
+						After(W3, 25.0f, [](UWorld* W4)
+						{
+							FString BackupName;
+							for (const FString& Line : GConvertLines)
+							{
+								FString Rest;
+								if (Line.Split(TEXT("Backup saved as '"), nullptr, &Rest))
+								{
+									Rest.Split(TEXT("'"), &BackupName, nullptr);
+								}
+							}
+							FString BackupPath;
+							const bool bFile = !BackupName.IsEmpty() && UFGSaveSystem::GetAbsolutePathForSaveGame(W4, BackupName, BackupPath) && FPaths::FileExists(BackupPath);
+							GConvert.Check(TEXT("4 backup written"), bFile, FString::Printf(TEXT("'%s' -> %s"), *BackupName, *BackupPath));
+							ASinkingDepotSubsystem* S4 = ASinkingDepotSubsystem::Get(W4);
+							GConvert.Check(TEXT("4 converted after the backup"), GetUploaders(W4, true).Num() == 0 && S4 && S4->GetUndoRecords().Num() == 5,
+								FString::Printf(TEXT("%d Sinking Depot(s) left, %d record(s)"), GetUploaders(W4, true).Num(), S4 ? S4->GetUndoRecords().Num() : -1));
+							SaveThen(W4, TEXT("SinkingDepot_ConvCheck_s1"), [](UWorld* W5, const bool bSaved5)
+							{
+								GConvert.Check(TEXT("4 saved for the reload"), bSaved5, TEXT("SinkingDepot_ConvCheck_s1"));
+								UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertCheck: part 1 done (%d of %d failed so far); loading SinkingDepot_ConvCheck_s1"), GConvert.Failed, GConvert.Checks);
+								GConvertPhase = 1;
+								GEngine->Exec(W5, TEXT("open Persistent_Level?loadgame=SinkingDepot_ConvCheck_s1?listen"));
+							});
+						});
+					});
+				});
+				});
+			});
+		});
+	}
+
+	void ConvertPart2(UWorld* World)
+	{
+		ASinkingDepotSubsystem* Subsystem = ASinkingDepotSubsystem::Get(World);
+		const int32 Loaded = Subsystem ? Subsystem->GetUndoRecords().Num() : -1;
+		GConvert.Check(TEXT("5 record survived the reload"), Loaded == 5 && GetUploaders(World, true).Num() == 0,
+			FString::Printf(TEXT("%d record(s), %d Sinking Depot(s)"), Loaded, GetUploaders(World, true).Num()));
+		CheckSwapped(World, TEXT("5 after reload"), false, 0, true);
+
+		// 6. Undo through the chat command after the reload.
+		const bool bSent = SendChatCommand(World, TEXT("sinkingdepot undo confirm"));
+		GConvert.Check(TEXT("6 chat undo sent"), bSent, TEXT(""));
+		After(World, 1.0f, [](UWorld* W0)
+		{
+			CheckSwapped(W0, TEXT("6 undo after reload"), true, 1, true);
+			CheckPaintLater(W0, TEXT("6 undo after reload"), true);
+		});
+
+		After(World, 7.0f, [](UWorld* W)
+		{
+			// 7. Convert, dismantle one of the uploaders, undo: that one is skipped.
+			GConvertLines.Reset();
+			SinkingDepot::Convert::RunConvert(W, {TEXT("confirm"), TEXT("nobackup")}, ConvertTestNames, CaptureReporter());
+			AFGCentralStorageContainer* C4 = UploaderAt(W, GConvertLoc[3], false);
+			if (C4)
+			{
+				C4->Destroy();
+			}
+			GConvertLines.Reset();
+			SinkingDepot::Convert::RunUndo(W, {TEXT("confirm")}, ConvertTestNames, CaptureReporter());
+			ASinkingDepotSubsystem* S = ASinkingDepotSubsystem::Get(W);
+			GConvert.Check(TEXT("7 dismantled one is skipped"), C4 && GetUploaders(W, true).Num() == 4 && !UploaderAt(W, GConvertLoc[3], true) && LinesContain(TEXT("had been dismantled"))
+				&& S && S->GetUndoRecords().IsEmpty(), FString::Printf(TEXT("%d Sinking Depot(s), %d record(s)"), GetUploaders(W, true).Num(), S ? S->GetUndoRecords().Num() : -1));
+
+			// 8. Convert once more and save, for the "load without the mod" test.
+			GConvertLines.Reset();
+			SinkingDepot::Convert::RunConvert(W, {TEXT("confirm"), TEXT("nobackup")}, ConvertTestNames, CaptureReporter());
+			GConvert.Check(TEXT("8 final convert"), GetUploaders(W, true).Num() == 0, FString::Printf(TEXT("%d Sinking Depot(s) left"), GetUploaders(W, true).Num()));
+			SaveThen(W, TEXT("SinkingDepot_ConvFinal"), [](UWorld* W2, const bool bSaved)
+			{
+				GConvert.Check(TEXT("8 final save"), bSaved, TEXT("SinkingDepot_ConvFinal"));
+				GConvertPhase = 2;
+				ConvertFinish(W2, TEXT("convert_done"));
+			});
+		});
+	}
+
+	/** -SinkingDepotConvertHost: two Sinking Depots; a joined client's command must be refused, the host's must work. */
+	void ConvertHostWaitForClient(TWeakObjectPtr<UWorld> WeakWorld, int32 Polls)
+	{
+		UWorld* World = WeakWorld.Get();
+		if (!World)
+		{
+			return;
+		}
+		int32 Players = 0;
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			Players += It->IsValid() && (*It)->GetPawn() ? 1 : 0;
+		}
+		if (Players < 2 && Polls < 400)
+		{
+			After(World, 3.0f, [WeakWorld, Polls](UWorld*) { ConvertHostWaitForClient(WeakWorld, Polls + 1); });
+			return;
+		}
+		UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ConvertHost: %d player(s); giving the client 60 s to try the command"), Players);
+		After(World, 60.0f, [Players](UWorld* W)
+		{
+			GConvert.Check(TEXT("H1 client joined"), Players >= 2, FString::Printf(TEXT("%d player(s)"), Players));
+			GConvert.Check(TEXT("H1 client refused"), GetUploaders(W, true).Num() == 2, FString::Printf(TEXT("%d Sinking Depot(s) still there"), GetUploaders(W, true).Num()));
+			const bool bSent = SendChatCommand(W, TEXT("sinkingdepot convert confirm nobackup"));
+			After(W, 1.0f, [bSent](UWorld* W2)
+			{
+				GConvert.Check(TEXT("H2 host allowed"), bSent && GetUploaders(W2, true).Num() == 0, FString::Printf(TEXT("%d Sinking Depot(s) left"), GetUploaders(W2, true).Num()));
+				ConvertFinish(W2, TEXT("convert_host_done"));
+			});
+		});
+	}
+
+	void SpawnConvertPair(UWorld* World, const FVector& Near, const float Yaw)
+	{
+		UClass* Ours = LoadClass<AFGBuildable>(nullptr, BuildClassPath);
+		const FVector Right = FRotationMatrix(FRotator(0.0f, Yaw, 0.0f)).GetUnitAxis(EAxis::Y);
+		const FVector Forward = FRotator(0.0f, Yaw, 0.0f).Vector();
+		AFGBuildable* A = SpawnOnGround(World, Ours, Near + Forward * 3000.0f - Right * 800.0f, Yaw + 180.0f);
+		AFGBuildable* B = SpawnOnGround(World, Ours, Near + Forward * 3000.0f + Right * 800.0f, Yaw + 180.0f);
+		After(World, 4.0f, [WeakA = TWeakObjectPtr<AActor>(A), WeakB = TWeakObjectPtr<AActor>(B)](UWorld* W)
+		{
+			const bool bWired = ConvWire(W, WeakA.Get(), WeakB.Get());
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] Convert pair: spawned %s and %s, wired %d"), *GetNameSafe(WeakA.Get()), *GetNameSafe(WeakB.Get()), bWired);
+		});
+	}
+
+	void ConvertWorldReady(UWorld* World)
+	{
+		const TCHAR* CommandLine = FCommandLine::Get();
+		if (FParse::Param(CommandLine, TEXT("SinkingDepotConvertCheck")) && World->GetNetMode() != NM_DedicatedServer)
+		{
+			if (GConvertPhase == 0)
+			{
+				UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotConvertCheck: part 1 starts in 30 s"));
+				After(World, 30.0f, [](UWorld* W) { ConvertPart1(W); });
+			}
+			else if (GConvertPhase == 1)
+			{
+				UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotConvertCheck: part 2 starts in 25 s"));
+				After(World, 25.0f, [](UWorld* W) { ConvertPart2(W); });
+			}
+		}
+		if (FParse::Param(CommandLine, TEXT("SinkingDepotConvertHost")) && World->GetNetMode() == NM_ListenServer)
+		{
+			After(World, 30.0f, [](UWorld* W)
+			{
+				APlayerController* Controller = nullptr;
+				AFGCharacterPlayer* Player = LocalPlayer(W, Controller);
+				if (Player)
+				{
+					SpawnConvertPair(W, FindGround(W, Player->GetActorLocation(), 200000.0f), Controller->GetControlRotation().Yaw);
+				}
+				UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotConvertHost: waiting for a client"));
+				ConvertHostWaitForClient(W, 0);
+			});
+		}
+		if (FParse::Param(CommandLine, TEXT("SinkingDepotConvertDS")) && World->GetNetMode() == NM_DedicatedServer)
+		{
+			After(World, 40.0f, [](UWorld* W)
+			{
+				TActorIterator<APlayerStart> Start(W);
+				const FVector Near = Start ? Start->GetActorLocation() : FVector::ZeroVector;
+				SpawnConvertPair(W, FindGround(W, Near, 200000.0f), Start ? Start->GetActorRotation().Yaw : 0.0f);
+				UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotConvertDS: two Sinking Depots spawned near %s"), *Near.ToString());
+			});
+		}
+	}
+
+	void ConvertClientWorldReady(UWorld* World)
+	{
+		if (!FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotClientConvertTry")))
+		{
+			return;
+		}
+		// The host spawns its buildings 30 s in; try after that.
+		After(World, 45.0f, [](UWorld* W)
+		{
+			const bool bSent = SendChatCommand(W, TEXT("sinkingdepot convert confirm nobackup"));
+			UE_LOG(LogSinkingDepot, Log, TEXT("[dev] ClientConvertTry: sent the convert chat command as a joined client: %d"), bSent);
+		});
+	}
+}
+
 void SinkingDepot::Dev::OnClientWorldReady(UWorld* World)
 {
+	if (World)
+	{
+		ConvertClientWorldReady(World);
+	}
 	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotClientCheck")))
 	{
 		UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotClientCheck: waiting for a Sinking Depot to replicate"));
@@ -2312,6 +3007,10 @@ void SinkingDepot::Dev::OnClientWorldReady(UWorld* World)
 
 void SinkingDepot::Dev::OnWorldReady(UWorld* World)
 {
+	if (World)
+	{
+		ConvertWorldReady(World);
+	}
 	if (World && World->GetNetMode() == NM_DedicatedServer && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotServerShowcase")))
 	{
 		UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotServerShowcase: waiting for a player to join"));

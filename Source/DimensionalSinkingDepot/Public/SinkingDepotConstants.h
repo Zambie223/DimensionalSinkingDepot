@@ -12,6 +12,14 @@ namespace SinkingDepot
 	inline constexpr const TCHAR* SchematicClassPath = TEXT("/DimensionalSinkingDepot/Schematics/Schematic_SinkingDepot.Schematic_SinkingDepot_C");
 	inline constexpr const TCHAR* BuildPackageName = TEXT("/DimensionalSinkingDepot/Buildable/Build_SinkingDepot");
 	inline constexpr const TCHAR* BuildClassName = TEXT("Build_SinkingDepot_C");
+	inline constexpr const TCHAR* BuildClassPath = TEXT("/DimensionalSinkingDepot/Buildable/Build_SinkingDepot.Build_SinkingDepot_C");
+	inline constexpr const TCHAR* RecipeClassPath = TEXT("/DimensionalSinkingDepot/Buildable/Recipe_SinkingDepot.Recipe_SinkingDepot_C");
+
+	/** Vanilla classes the convert command turns Sinking Depots into (and the undo command turns back). */
+	inline constexpr const TCHAR* VanillaUploaderClassPath = TEXT("/Game/FactoryGame/Buildable/Factory/CentralStorage/Build_CentralStorage.Build_CentralStorage_C");
+	inline constexpr const TCHAR* VanillaUploaderRecipePath = TEXT("/Game/FactoryGame/Recipes/Buildings/Recipe_CentralStorage.Recipe_CentralStorage_C");
+	inline constexpr const TCHAR* PowerLineClassPath = TEXT("/Game/FactoryGame/Buildable/Factory/PowerLine/Build_PowerLine.Build_PowerLine_C");
+	inline constexpr const TCHAR* PowerLineRecipePath = TEXT("/Game/FactoryGame/Recipes/Buildings/Recipe_PowerLine.Recipe_PowerLine_C");
 
 	/** The vanilla MAM research that unlocks the Dimensional Depot; ours is granted alongside it. */
 	inline constexpr const TCHAR* DepotResearchClassPath = TEXT("/Game/FactoryGame/Schematics/Research/AlienTech_RS/Research_Alien_CentralStorage.Research_Alien_CentralStorage_C");

@@ -6,6 +6,7 @@
 #include "SinkingDepotOverflow.h"
 #include "SinkingDepotWindow.h"
 
+#include "Buildables/FGBuildable.h"
 #include "Buildables/FGBuildableFactory.h"
 #include "Buildables/FGCentralStorageContainer.h"
 #include "Net/UnrealNetwork.h"
@@ -261,6 +262,14 @@ void ASinkingDepotSubsystem::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+void ASinkingDepotSubsystem::PostLoadGame_Implementation(int32 SaveVersion, int32 GameVersion)
+{
+	// Uploaders dismantled before the save was written come back as null; they can't be restored anyway.
+	const int32 Before = UndoRecords.Num();
+	UndoRecords.RemoveAll([](const FSinkingDepotConvertRecord& Record) { return !IsValid(Record.Uploader); });
+	UE_LOG(LogSinkingDepot, Log, TEXT("Loaded the undo record of the last conversion: %d uploader(s) (%d no longer exist)"), UndoRecords.Num(), Before - UndoRecords.Num());
+}
+
 void ASinkingDepotSubsystem::OnNextTickAfterBeginPlay()
 {
 	// Everything has begun play now; the game's subsystems certainly exist.
@@ -504,6 +513,18 @@ void ASinkingDepotSubsystem::DescribeStatus(FOutputDevice& Ar) const
 		Lines.Add(FString::Printf(TEXT("  Without power (not sinking): %d"), Unpowered));
 	}
 	Lines.Add(FString::Printf(TEXT("  Grinders running right now: %d"), ActiveSinkers.Num()));
+	int32 Undoable = 0;
+	for (const FSinkingDepotConvertRecord& Record : UndoRecords)
+	{
+		Undoable += IsValid(Record.Uploader) ? 1 : 0;
+	}
+	Lines.Add(Undoable > 0
+		? FString::Printf(TEXT("  Last conversion to vanilla uploaders: %d can still be turned back (SinkingDepot.UndoConvert)"), Undoable)
+		: FString(TEXT("  Nothing to undo from a conversion to vanilla uploaders")));
+	if (!LastConvertResult.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("  Last convert/undo result: %s"), *LastConvertResult));
+	}
 	Lines.Add(FString::Printf(TEXT("  Sunk since the game was launched: %lld (depot full), %lld (uploader couldn't keep up)"),
 		Runtime.SunkDepotFull.load(), Runtime.SunkCantKeepUp.load()));
 	const int64 Returned = Runtime.ReturnedToBuffer.load();

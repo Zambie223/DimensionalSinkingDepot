@@ -21,7 +21,7 @@ public:
 	virtual void DispatchLifecycleEvent(ELifecyclePhase Phase) override;
 };
 
-/** Root game world module: registers the schematic and spawns the server subsystem in game worlds. */
+/** Root game world module: registers the schematic and the /sinkingdepot chat command, and spawns the server subsystem in game worlds. */
 UCLASS()
 class DIMENSIONALSINKINGDEPOT_API USinkingDepotGameWorldModule : public UGameWorldModule
 {
