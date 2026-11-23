@@ -2,6 +2,17 @@
 
 Changes made after the first public release are listed here.
 
+## 0.2.0
+
+### Added
+- `/sinkingdepot convert` (in chat, single player or host) and `SinkingDepot.ConvertAll` (dedicated server console)
+  turn every Dimensional Sinking Depot into a normal Dimensional Depot Uploader, keeping its belt, paint and buffered
+  items, so the mod can be removed without losing them. It explains what it will do first, and asks whether to save a
+  backup.
+- `/sinkingdepot undo` and `SinkingDepot.UndoConvert` turn the uploaders from the last conversion back, for free,
+  with their power wires where possible. The undo information is kept in the save.
+- `Tools/convert_to_vanilla.py`: the same conversion for a save or blueprint file, without the game.
+
 ## 0.1.2
 
 ### Fixed

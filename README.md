@@ -60,13 +60,66 @@ On a dedicated server, run these from the Server Manager console:
 | `SinkingDepot.Set SinkWhenUploaderCantKeepUp off` | Changes and saves a setting (`on` or `off`). It applies immediately. |
 | `SinkingDepot.Set RequirePower on` | The same for the power setting. |
 
+## Removing the mod
+
+If you just remove the mod, every Dimensional Sinking Depot disappears from your save, along with the items waiting
+inside it. To keep them, turn them into normal Dimensional Depot Uploaders first.
+
+**In game (single player, or the host of a multiplayer game):**
+
+1. Type `/sinkingdepot convert` in chat. It tells you how many buildings it will change and what happens to their
+   wires. Nothing is changed yet.
+2. Type `/sinkingdepot convert confirm backup` to save a backup of your world first and then convert, or
+   `/sinkingdepot convert confirm nobackup` to convert without a backup.
+3. Save the game, then remove the mod.
+
+**On a dedicated server**, use the Server Manager console: `SinkingDepot.ConvertAll`, then
+`SinkingDepot.ConvertAll confirm backup` (or `confirm nobackup`). Run `SinkingDepot.Status` a few seconds later to see
+the result.
+
+What happens to each building:
+- It becomes a normal uploader in the same place, with the same belt, paint and buffered items.
+- Its power wire, if it has one, is removed, because a normal uploader has no power connector.
+- Nothing is refunded, including the AWESOME Sink half of the cost.
+
+**Changed your mind?** While the mod is still installed, `/sinkingdepot undo` (console: `SinkingDepot.UndoConvert`)
+turns the uploaders from the last conversion back into Dimensional Sinking Depots, for free. This also works after
+saving and reloading. Power wires come back where the building at the other end still exists and has a free slot.
+Uploaders you built yourself are never touched.
+
+### Already removed the mod, or can't load the game with it?
+
+[`Tools/convert_to_vanilla.py`](Tools/convert_to_vanilla.py) does the same conversion on a save file or blueprint
+file, without the game. It needs Python 3.9 or newer and nothing else.
+
+```
+python convert_to_vanilla.py "MySave.sav"
+```
+
+It writes a new file next to the original (`MySave_vanilla.sav`) and never changes the original. It refuses to write
+anything if it can't read the file back exactly, or if the file comes from a game version it hasn't been tested with
+(`--force` tries anyway). `--dry-run` shows what it would change without writing anything. Load the new file with the
+mod removed, and keep the original until you've checked the result in game.
+
+Saves are in `%LOCALAPPDATA%\FactoryGame\Saved\SaveGames\<your id>\`, and blueprints in the `blueprints` folder next
+to it.
+
 ## Notes
 
 - By default the building needs no power, like the uploader. Sinking happens on the host or server.
-- Removing the mod removes the buildings from your save, along with any items waiting inside them. The Dimensional Depot's contents are not affected.
+- To remove the mod without losing your Sinking Depots, see [Removing the mod](#removing-the-mod).
 - This mod works together with mods that change the Depot's upload speed or stack limit.
 
 ## Status
+
+Version 0.2.0 adds a way to turn every Dimensional Sinking Depot back into a normal uploader before removing the mod,
+and to undo that. On Satisfactory 1.2.5.1 it passed:
+- an automated in-game check: conversion with the chat and console commands, the backup save, belts, buffered items,
+  paint, power wires (including one between two Sinking Depots and one inside a Blueprint Designer), undo before and
+  after saving and reloading, and a dismantled uploader being skipped
+- a hosted game, where a joined player is refused and the host can convert
+- a Windows dedicated server, through the Server Manager console
+- loading the converted save, and the offline script's output, in the game without the mod
 
 Version 0.1.2 makes the mod work with Satisfactory 1.2.5.1 and SML 3.12.1. That game update changed the layout of the building this mod extends, so 0.1.1 crashes there when a save contains a Dimensional Sinking Depot (see [CHANGELOG.md](CHANGELOG.md)). On 1.2.5.1, before release, 0.1.2 passed:
 - the automated in-game check below, in a hosted game on Windows
