@@ -196,37 +196,73 @@ namespace
 		return Rects.Num();
 	}
 
-	/**
-	 * A left click fed into Slate at the middle of Widget, hit-tested like a real one. The OS cursor isn't moved.
-	 * Slate refuses the mouse capture a button click needs while the application isn't active (FSlateApplication::ProcessReply),
-	 * and the test window never is, so that rule is lifted for just these three events.
-	 */
-	void ClickWidget(const UWidget* Widget)
+	void SendMouse(const FVector2D& At, const bool bClick)
 	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FModifierKeysState NoModifiers;
+		const TSet<FKey> NoButtons;
+		const TSet<FKey> LeftDown = {EKeys::LeftMouseButton};
+		// Slate refuses the mouse capture a button click needs while the application isn't active (FSlateApplication::
+		// ProcessReply), and the off-screen test window never is, so that rule is lifted for just these events.
+		const bool bOldInactiveInput = Slate.GetHandleDeviceInputWhenApplicationNotActive();
+		Slate.SetHandleDeviceInputWhenApplicationNotActive(true);
+		Slate.ProcessMouseMoveEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::Invalid, 0.0f, NoModifiers));
+		if (bClick)
+		{
+			Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(0, 0, At, At, LeftDown, EKeys::LeftMouseButton, 0.0f, NoModifiers));
+			Slate.ProcessMouseButtonUpEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::LeftMouseButton, 0.0f, NoModifiers));
+		}
+		Slate.SetHandleDeviceInputWhenApplicationNotActive(bOldInactiveInput);
+	}
+
+	FVector2D Middle(const UWidget* Widget)
+	{
+		const FSlateRect Rect = Widget->GetCachedGeometry().GetLayoutBoundingRect();
+		return FVector2D((Rect.Left + Rect.Right) * 0.5, (Rect.Top + Rect.Bottom) * 0.5);
+	}
+
+	/**
+	 * Like a player: the pointer moves onto the widget first, then, a moment later (the game may switch from gamepad to mouse
+	 * layout on that move), it clicks the widget where it is drawn now. Find is asked again for the click.
+	 */
+	void ClickWidget(UWorld* World, TFunction<UWidget*(UWorld*)> Find)
+	{
+		UWidget* Widget = Find(World);
 		if (!Widget || !FSlateApplication::IsInitialized())
 		{
 			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] nothing to click (%s)"), *GetNameSafe(Widget));
 			return;
 		}
-		const FSlateRect Rect = Widget->GetCachedGeometry().GetLayoutBoundingRect();
-		const FVector2D At((Rect.Left + Rect.Right) * 0.5, (Rect.Top + Rect.Bottom) * 0.5);
-		FSlateApplication& Slate = FSlateApplication::Get();
-		const FModifierKeysState NoModifiers;
-		const TSet<FKey> NoButtons;
-		const TSet<FKey> LeftDown = {EKeys::LeftMouseButton};
-		const bool bOldInactiveInput = Slate.GetHandleDeviceInputWhenApplicationNotActive();
-		Slate.SetHandleDeviceInputWhenApplicationNotActive(true);
-		Slate.ProcessMouseMoveEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::Invalid, 0.0f, NoModifiers));
-		Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(0, 0, At, At, LeftDown, EKeys::LeftMouseButton, 0.0f, NoModifiers));
-		Slate.ProcessMouseButtonUpEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::LeftMouseButton, 0.0f, NoModifiers));
-		Slate.SetHandleDeviceInputWhenApplicationNotActive(bOldInactiveInput);
-		UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s (application active %d)"), *GetNameSafe(Widget), *At.ToString(), Slate.IsActive());
+		const FVector2D First = Middle(Widget);
+		SendMouse(First, false);
+		Then(World, 0.3f, [Find = MoveTemp(Find), First](UWorld* W)
+		{
+			UWidget* Target = Find(W);
+			if (!Target)
+			{
+				UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] the widget to click is gone"));
+				return;
+			}
+			const FVector2D At = Middle(Target);
+			SendMouse(At, true);
+			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s (moved onto it at %s; application active %d)"), *GetNameSafe(Target), *At.ToString(), *First.ToString(), FSlateApplication::Get().IsActive());
+		});
 	}
 
 	void ClickTab(UWorld* World, const int32 Index)
 	{
-		const TArray<UWidget*> Buttons = TabButtons(WindowOf(OpenWidgetFor(World, GOurs.Get())));
-		ClickWidget(Buttons.IsValidIndex(Index) ? Buttons[Index] : nullptr);
+		ClickWidget(World, [Index](UWorld* W) -> UWidget*
+		{
+			const TArray<UWidget*> Buttons = TabButtons(WindowOf(OpenWidgetFor(W, GOurs.Get())));
+			return Buttons.IsValidIndex(Index) ? Buttons[Index] : nullptr;
+		});
+	}
+
+	UWidget* PanelWidget(UWorld* World, const TCHAR* Name);
+
+	void ClickPrint(UWorld* World)
+	{
+		ClickWidget(World, [](UWorld* W) { return PanelWidget(W, TEXT("PrintButton")); });
 	}
 
 	void PressKey(const FKey& Key)
@@ -340,7 +376,7 @@ namespace
 		const int32 Before = CouponsInInventory(World);
 		Then(World, 1.0f, [Before](UWorld* W)
 		{
-			ClickWidget(PanelWidget(W, TEXT("PrintButton")));
+			ClickPrint(W);
 			Then(W, 2.0f, [Before](UWorld* W2)
 			{
 				AFGResourceSinkSubsystem* Sink2 = AFGResourceSinkSubsystem::Get(W2);
@@ -351,7 +387,7 @@ namespace
 				Then(W2, 1.0f, [Left](UWorld* W3)
 				{
 					const int32 Before3 = CouponsInInventory(W3);
-					ClickWidget(PanelWidget(W3, TEXT("PrintButton")));
+					ClickPrint(W3);
 					Then(W3, 2.0f, [Left, Before3](UWorld* W4)
 					{
 						AFGResourceSinkSubsystem* Sink4 = AFGResourceSinkSubsystem::Get(W4);
@@ -368,7 +404,7 @@ namespace
 	{
 		CheckTab(World, TEXT("3 the sink tab is showing before Print"), 1);
 		const int32 Before = CouponsInInventory(World);
-		ClickWidget(PanelWidget(World, TEXT("PrintButton")));
+		ClickPrint(World);
 		Then(World, 2.0f, [Before](UWorld* W)
 		{
 			AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(W);
@@ -404,17 +440,22 @@ namespace
 						Then(W4, 1.0f, [](UWorld* W5)
 						{
 							CheckTab(W5, TEXT("2 gamepad right bumper shows the AWESOME Sink tab"), 1);
+							PressKey(EKeys::Gamepad_RightShoulder);
+							Then(W5, 1.0f, [](UWorld* W5b)
+							{
+							CheckTab(W5b, TEXT("2 right bumper on the last tab changes nothing"), 1);
 							PressKey(EKeys::Gamepad_LeftShoulder);
-							Then(W5, 1.0f, [](UWorld* W6)
+							Then(W5b, 1.0f, [](UWorld* W6)
 							{
 								CheckTab(W6, TEXT("2 gamepad left bumper goes back"), 0);
 								PressKey(EKeys::Gamepad_LeftShoulder);
 								Then(W6, 1.0f, [](UWorld* W7)
 								{
 									CheckTab(W7, TEXT("2 left bumper on the first tab changes nothing"), 0);
-									ClickTab(W7, 1); // stay on the sink tab for the print steps
+									ClickTab(W7, 1); // stay on the sink tab for the print steps (a click after gamepad use)
 									Then(W7, 1.5f, Step3Print);
 								});
+							});
 							});
 						});
 					});

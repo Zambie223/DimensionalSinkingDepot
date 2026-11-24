@@ -66,8 +66,9 @@ namespace
 	}
 
 	/**
-	 * While a panel of ours is open: the gamepad's left bumper goes back from the sink tab. The window frame handles the right
-	 * bumper itself, but never reports the left one, because the index it steps back from is always 0 in this panel.
+	 * While a panel of ours is open: the gamepad bumpers switch between the two tabs. The window frame's own handling isn't
+	 * reliable here (it steps from an index that's always 0 in this panel, and sometimes doesn't report at all), so while our
+	 * window is up the bumpers are consumed before they reach the frame.
 	 */
 	class FTabInput final : public IInputProcessor
 	{
@@ -79,7 +80,15 @@ namespace
 		virtual bool HandleKeyDownEvent(FSlateApplication&, const FKeyEvent& Event) override
 		{
 			USinkingDepotSinkPanel* Target = Panel.Get();
-			return Target && Event.GetKey() == EKeys::Gamepad_LeftShoulder && !Event.IsRepeat() && Target->OnGamepadPreviousTab();
+			if (!Target || Event.IsRepeat())
+			{
+				return false;
+			}
+			if (Event.GetKey() == EKeys::Gamepad_RightShoulder)
+			{
+				return Target->OnGamepadTab(true);
+			}
+			return Event.GetKey() == EKeys::Gamepad_LeftShoulder && Target->OnGamepadTab(false);
 		}
 
 	private:
@@ -376,27 +385,28 @@ void USinkingDepotSinkPanel::ShowTab(const int32 Index)
 
 void USinkingDepotSinkPanel::OnTabClicked(const int32 ButtonIndex)
 {
-	const AFGPlayerController* Controller = Cast<AFGPlayerController>(GetOwningPlayer());
-	const bool bGamepad = Controller && Controller->GetIsUsingGamepad();
-	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: the window reported tab button %d, gamepad %d"), ButtonIndex, bGamepad);
+	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: the window reported tab button %d"), ButtonIndex);
 	if (!Depot.IsValid())
 	{
 		return;
 	}
-	// The gamepad's next-tab button always reports 0 here, because the frame reads its index from a sliding-tabs
-	// widget this panel doesn't have. With two tabs, next means the other one.
-	SelectTab(bGamepad && ButtonIndex == 0 ? 1 - ActiveTab : (ButtonIndex == 1 ? 1 : 0));
+	// Bumper presses never get here (the input processor takes the ones that switch), so this is a real tab button.
+	SelectTab(ButtonIndex == 1 ? 1 : 0);
 }
 
-bool USinkingDepotSinkPanel::OnGamepadPreviousTab()
+bool USinkingDepotSinkPanel::OnGamepadTab(const bool bNext)
 {
-	if (ActiveTab != 1 || !Depot.IsValid())
+	if (!Depot.IsValid() || !Window.IsValid() || !Window->IsVisible() || !Window->GetCachedWidget().IsValid())
 	{
-		return false;
+		return false; // not our window right now: leave the button to whoever has it
 	}
-	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: gamepad previous tab"));
-	SelectTab(0);
-	return true;
+	const int32 Wanted = bNext ? 1 : 0;
+	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: gamepad %s tab"), bNext ? TEXT("next") : TEXT("previous"));
+	if (ActiveTab != Wanted)
+	{
+		SelectTab(Wanted);
+	}
+	return true; // ours either way, so the frame can't flip the tab back
 }
 
 void USinkingDepotSinkPanel::SelectTab(const int32 Index)

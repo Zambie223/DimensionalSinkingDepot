@@ -41,8 +41,8 @@ public:
 
 	void ShowPrintResult(int32 Printed, int32 StillAvailable, bool bRefused);
 
-	/** The gamepad's previous-tab button, which the window frame doesn't report here. True if it was used. */
-	bool OnGamepadPreviousTab();
+	/** A gamepad tab button (bNext: right bumper). Switches to the tab it points to; true if it was ours to handle (our window is up). */
+	bool OnGamepadTab(bool bNext);
 
 	/** The window frame's OnTabButtonClicked: a tab was clicked, or a gamepad tab button pressed. */
 	UFUNCTION()
