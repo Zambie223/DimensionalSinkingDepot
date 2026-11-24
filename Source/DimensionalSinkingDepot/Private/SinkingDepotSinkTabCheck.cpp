@@ -19,11 +19,15 @@
 #include "Components/Overlay.h"
 #include "Components/TextBlock.h"
 #include "Engine/World.h"
+#include "FGPlayerController.h"
+#include "Framework/Application/SlateApplication.h"
+#include "InputCoreTypes.h"
 #include "FGBuildableSubsystem.h"
 #include "FGCharacterPlayer.h"
 #include "FGHUD.h"
 #include "FGInventoryComponent.h"
 #include "FGResourceSinkSubsystem.h"
+#include "Resources/FGItemDescriptor.h"
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
 #include "UI/FGGameUI.h"
@@ -192,6 +196,81 @@ namespace
 		return Rects.Num();
 	}
 
+	/** A left click fed into Slate at the middle of Widget, hit-tested like a real one. The OS cursor isn't moved. */
+	void ClickWidget(const UWidget* Widget)
+	{
+		if (!Widget || !FSlateApplication::IsInitialized())
+		{
+			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] nothing to click (%s)"), *GetNameSafe(Widget));
+			return;
+		}
+		const FSlateRect Rect = Widget->GetCachedGeometry().GetLayoutBoundingRect();
+		const FVector2D At((Rect.Left + Rect.Right) * 0.5, (Rect.Top + Rect.Bottom) * 0.5);
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FModifierKeysState NoModifiers;
+		const TSet<FKey> NoButtons;
+		const TSet<FKey> LeftDown = {EKeys::LeftMouseButton};
+		Slate.ProcessMouseMoveEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::Invalid, 0.0f, NoModifiers));
+		Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(0, 0, At, At, LeftDown, EKeys::LeftMouseButton, 0.0f, NoModifiers));
+		Slate.ProcessMouseButtonUpEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::LeftMouseButton, 0.0f, NoModifiers));
+		UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s"), *GetNameSafe(Widget), *At.ToString());
+	}
+
+	void ClickTab(UWorld* World, const int32 Index)
+	{
+		const TArray<UWidget*> Buttons = TabButtons(WindowOf(OpenWidgetFor(World, GOurs.Get())));
+		ClickWidget(Buttons.IsValidIndex(Index) ? Buttons[Index] : nullptr);
+	}
+
+	void PressKey(const FKey& Key)
+	{
+		if (FSlateApplication::IsInitialized())
+		{
+			constexpr uint32 LocalUser = 0; // the user-index constructor, like the dev commands' SlateKey
+			const FModifierKeysState NoModifiers;
+			FSlateApplication::Get().ProcessKeyDownEvent(FKeyEvent(Key, NoModifiers, LocalUser, false, 0, 0));
+			FSlateApplication::Get().ProcessKeyUpEvent(FKeyEvent(Key, NoModifiers, LocalUser, false, 0, 0));
+		}
+	}
+
+	bool UsingGamepad(UWorld* World)
+	{
+		const AFGPlayerController* Controller = Cast<AFGPlayerController>(World->GetFirstPlayerController());
+		return Controller && Controller->GetIsUsingGamepad();
+	}
+
+	UWidget* PanelWidget(UWorld* World, const TCHAR* Name)
+	{
+		USinkingDepotSinkPanel* Panel = PanelOf(WindowOf(OpenWidgetFor(World, GOurs.Get())));
+		return Panel && Panel->WidgetTree ? Panel->WidgetTree->FindWidget(FName(Name)) : nullptr;
+	}
+
+	FString StatusText(UWorld* World)
+	{
+		const UTextBlock* Status = Cast<UTextBlock>(PanelWidget(World, TEXT("StatusText")));
+		return Status ? Status->GetText().ToString() : TEXT("(no status text)");
+	}
+
+	/** Which content shows, 0 the uploader's, 1 the sink panel, -1 neither or both. And which tab button is highlighted. */
+	void CheckTab(UWorld* World, const TCHAR* Name, const int32 Expected)
+	{
+		UUserWidget* Window = WindowOf(OpenWidgetFor(World, GOurs.Get()));
+		const bool bSink = Shown(PanelOf(Window));
+		const bool bVanilla = Shown(VanillaContentOf(Window));
+		const int32 Showing = bSink == bVanilla ? -1 : (bSink ? 1 : 0);
+		int32 Highlighted = -1;
+		const TArray<UWidget*> Buttons = TabButtons(Window);
+		for (int32 Index = 0; Index < Buttons.Num(); ++Index)
+		{
+			const FBoolProperty* Active = FindFProperty<FBoolProperty>(Buttons[Index]->GetClass(), TEXT("IsActive"));
+			if (Active && Active->GetPropertyValue_InContainer(Buttons[Index]))
+			{
+				Highlighted = Index;
+			}
+		}
+		Check(Name, Showing == Expected && Highlighted == Expected, FString::Printf(TEXT("showing %d, highlighted %d, expected %d, gamepad %d"), Showing, Highlighted, Expected, UsingGamepad(World)));
+	}
+
 	int32 CouponsInInventory(UWorld* World)
 	{
 		APlayerController* Controller = World->GetFirstPlayerController();
@@ -236,51 +315,97 @@ namespace
 		});
 	}
 
+	/** 600 coupons into an inventory with no free slot: only what tops up the coupon stack fits, the rest must stay available. */
+	void Step3Full(UWorld* World)
+	{
+		APlayerController* Controller = World->GetFirstPlayerController();
+		AFGCharacterPlayer* Player = Controller ? Cast<AFGCharacterPlayer>(Controller->GetPawn()) : nullptr;
+		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
+		UClass* Plate = LoadClass<UFGItemDescriptor>(nullptr, TEXT("/Game/FactoryGame/Resource/Parts/IronPlate/Desc_IronPlate.Desc_IronPlate_C"));
+		if (!Player || !Player->GetInventory() || !Sink || !Plate)
+		{
+			Check(TEXT("3 full inventory setup"), false, TEXT(""));
+			Step4Vanilla(World);
+			return;
+		}
+		Player->GetInventory()->AddStack(FInventoryStack(100000, TSubclassOf<UFGItemDescriptor>(Plate)), true);
+		Sink->AddResourceSinkCoupons(600, false);
+		const int32 Before = CouponsInInventory(World);
+		Then(World, 1.0f, [Before](UWorld* W)
+		{
+			ClickWidget(PanelWidget(W, TEXT("PrintButton")));
+			Then(W, 2.0f, [Before](UWorld* W2)
+			{
+				AFGResourceSinkSubsystem* Sink2 = AFGResourceSinkSubsystem::Get(W2);
+				const int32 Added = CouponsInInventory(W2) - Before;
+				const int32 Left = Sink2->GetNumCoupons();
+				Check(TEXT("3 full inventory: some printed, none lost"), Added > 0 && Left > 0 && Added + Left == 600, FString::Printf(TEXT("added %d, still available %d, status '%s'"), Added, Left, *StatusText(W2)));
+				Shot(TEXT("3_full"));
+				Then(W2, 1.0f, [Left](UWorld* W3)
+				{
+					const int32 Before3 = CouponsInInventory(W3);
+					ClickWidget(PanelWidget(W3, TEXT("PrintButton")));
+					Then(W3, 2.0f, [Left, Before3](UWorld* W4)
+					{
+						AFGResourceSinkSubsystem* Sink4 = AFGResourceSinkSubsystem::Get(W4);
+						Check(TEXT("3 no room at all: nothing printed, none lost, and it says so"), CouponsInInventory(W4) == Before3 && Sink4->GetNumCoupons() == Left && StatusText(W4).Contains(TEXT("No room")),
+							FString::Printf(TEXT("inventory %d -> %d, available %d -> %d, status '%s'"), Before3, CouponsInInventory(W4), Left, Sink4->GetNumCoupons(), *StatusText(W4)));
+						Step4Vanilla(W4);
+					});
+				});
+			});
+		});
+	}
+
 	void Step3Print(UWorld* World)
 	{
-		UUserWidget* Window = WindowOf(OpenWidgetFor(World, GOurs.Get()));
-		USinkingDepotSinkPanel* Panel = PanelOf(Window);
+		CheckTab(World, TEXT("3 the sink tab is showing before Print"), 1);
 		const int32 Before = CouponsInInventory(World);
-		Check(TEXT("3 the sink tab is showing when Print is pressed"), Shown(Panel), FString::Printf(TEXT("panel %d, shown %d"), Panel != nullptr, Shown(Panel)));
-		if (Panel)
-		{
-			Panel->OnPrintClicked();
-		}
+		ClickWidget(PanelWidget(World, TEXT("PrintButton")));
 		Then(World, 2.0f, [Before](UWorld* W)
 		{
 			AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(W);
 			const int32 After = CouponsInInventory(W);
 			const int32 Left = Sink ? Sink->GetNumCoupons() : -1;
-			Check(TEXT("3 print puts every coupon in the inventory"), After - Before == CouponsGiven && Left == 0, FString::Printf(TEXT("inventory %d -> %d, still available %d"), Before, After, Left));
-			USinkingDepotSinkPanel* P = PanelOf(WindowOf(OpenWidgetFor(W, GOurs.Get())));
-			const UTextBlock* Status = P && P->WidgetTree ? Cast<UTextBlock>(P->WidgetTree->FindWidget(TEXT("StatusText"))) : nullptr;
-			Check(TEXT("3 status line reports the print"), Status && !Status->GetText().IsEmpty(), Status ? Status->GetText().ToString() : TEXT("(no status text)"));
+			Check(TEXT("3 clicking Print puts every coupon in the inventory"), After - Before == CouponsGiven && Left == 0, FString::Printf(TEXT("inventory %d -> %d, still available %d"), Before, After, Left));
+			Check(TEXT("3 status line reports the print"), StatusText(W).Contains(TEXT("7 coupons")), StatusText(W));
+			const UWidget* Button = PanelWidget(W, TEXT("PrintButton"));
+			Check(TEXT("3 Print is disabled with none left"), Button && !Button->GetIsEnabled(), TEXT(""));
 			Shot(TEXT("3_printed"));
-			Then(W, 2.0f, Step4Vanilla);
+			Then(W, 1.0f, Step3Full);
 		});
 	}
 
 	void Step2Tabs(UWorld* World)
 	{
-		UUserWidget* Window = WindowOf(OpenWidgetFor(World, GOurs.Get()));
-		PressTab(Window, true);
+		ClickTab(World, 1);
 		Then(World, 1.0f, [](UWorld* W)
 		{
-			UUserWidget* Window2 = WindowOf(OpenWidgetFor(W, GOurs.Get()));
-			USinkingDepotSinkPanel* Panel = PanelOf(Window2);
-			const bool bSinkTabShown = Shown(Panel);
-			Check(TEXT("2 next tab shows the AWESOME Sink tab"), Shown(Panel) && !Shown(VanillaContentOf(Window2)), FString::Printf(TEXT("sink panel shown %d, vanilla shown %d"), Shown(Panel), Shown(VanillaContentOf(Window2))));
+			CheckTab(W, TEXT("2 clicking the second tab shows the AWESOME Sink tab"), 1);
 			Shot(TEXT("2_sinktab"));
-			Then(W, 1.0f, [bSinkTabShown](UWorld* W2)
+			Then(W, 1.0f, [](UWorld* W2)
 			{
-				UUserWidget* Window3 = WindowOf(OpenWidgetFor(W2, GOurs.Get()));
-				PressTab(Window3, false);
-				Then(W2, 1.0f, [bSinkTabShown](UWorld* W3)
+				ClickTab(W2, 0);
+				Then(W2, 1.0f, [](UWorld* W3)
 				{
-					UUserWidget* Window4 = WindowOf(OpenWidgetFor(W3, GOurs.Get()));
-					Check(TEXT("2 previous tab goes back to the uploader"), bSinkTabShown && Shown(VanillaContentOf(Window4)) && !Shown(PanelOf(Window4)), bSinkTabShown ? TEXT("") : TEXT("(the sink tab never showed, so going back proves nothing)"));
-					PressTab(Window4, true); // stay on the sink tab for the print step
-					Then(W3, 1.5f, Step3Print);
+					CheckTab(W3, TEXT("2 clicking the first tab goes back"), 0);
+					ClickTab(W3, 0);
+					Then(W3, 1.0f, [](UWorld* W4)
+					{
+						CheckTab(W4, TEXT("2 clicking the tab that's already open changes nothing"), 0);
+						PressKey(EKeys::Gamepad_RightShoulder);
+						Then(W4, 1.0f, [](UWorld* W5)
+						{
+							CheckTab(W5, TEXT("2 gamepad right bumper shows the AWESOME Sink tab"), 1);
+							PressKey(EKeys::Gamepad_LeftShoulder);
+							Then(W5, 1.0f, [](UWorld* W6)
+							{
+								CheckTab(W6, TEXT("2 gamepad left bumper goes back"), 0);
+								ClickTab(W6, 1); // stay on the sink tab for the print steps
+								Then(W6, 1.5f, Step3Print);
+							});
+						});
+					});
 				});
 			});
 		});
@@ -343,6 +468,7 @@ namespace
 		GOurs = Spawn(World, BuildClassPath, Base - Right * 600.0f, Yaw + 180.0f);
 		GVanilla = Spawn(World, VanillaUploaderClassPath, Base + Right * 600.0f, Yaw + 180.0f);
 		Sink->AddResourceSinkCoupons(CouponsGiven - Sink->GetNumCoupons(), false);
+		LogSinkingDepot.SetVerbosity(ELogVerbosity::Verbose);
 		Check(TEXT("0 setup"), GOurs.IsValid() && GVanilla.IsValid() && Sink->GetNumCoupons() == CouponsGiven,
 			FString::Printf(TEXT("ours %s, vanilla %s, coupons available %d"), *GetNameSafe(GOurs.Get()), *GetNameSafe(GVanilla.Get()), Sink->GetNumCoupons()));
 		Then(World, 3.0f, Step1Open);

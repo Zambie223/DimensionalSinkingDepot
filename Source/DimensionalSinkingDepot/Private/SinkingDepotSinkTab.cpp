@@ -9,6 +9,7 @@
 #include "Brushes/SlateColorBrush.h"
 #include "Buildables/FGCentralStorageContainer.h"
 #include "Components/Button.h"
+#include "Components/CanvasPanel.h"
 #include "Components/Image.h"
 #include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
@@ -38,6 +39,8 @@ namespace
 	constexpr const TCHAR* DnaIconPath = TEXT("/Game/FactoryGame/Resource/Parts/AlienDNACapsule/UI/IconDesc_AlienDNA_256.IconDesc_AlienDNA_256");
 	const FName WindowName(TEXT("Widget_Window_DarkMode"));
 	const FName WindowBodySlot(TEXT("WindowBody"));
+	const FName TabsContainerName(TEXT("Widget_TabsContainer"));
+	const FName TabButtonsName(TEXT("mContainer"));
 	const FName OverlayName(TEXT("SinkingDepotTabOverlay"));
 	const FName PanelName(TEXT("SinkingDepotSinkPanel"));
 	const FName FontSourceName(TEXT("mUploadRateText"));
@@ -79,68 +82,86 @@ namespace
 		return Cache.Get();
 	}
 
-	int32 GetActiveTabIndex(UUserWidget* Window)
+	UUserWidget* TabsContainer(UUserWidget* Window)
 	{
-		int32 Index = 0;
-		Reflection::Call(Window, TEXT("GetActiveTabIndex"), [](UFunction*, uint8*) {}, [&Index](UFunction* F, uint8* P)
-		{
-			Index = Reflection::GetInt(F, P, TEXT("ActiveTabIndex"), 0);
-		});
-		return Index;
+		return Window && Window->WidgetTree ? Cast<UUserWidget>(Window->WidgetTree->FindWidget(TabsContainerName)) : nullptr;
+	}
+
+	/** The tab buttons the frame made, in order. */
+	TArray<UWidget*> TabButtons(UUserWidget* Window)
+	{
+		UUserWidget* Container = TabsContainer(Window);
+		const UCanvasPanel* Canvas = Container && Container->WidgetTree ? Cast<UCanvasPanel>(Container->WidgetTree->FindWidget(TabButtonsName)) : nullptr;
+		return Canvas ? Canvas->GetAllChildren() : TArray<UWidget*>();
+	}
+
+	const FBoolProperty* FindBool(const UObject* Object, const TCHAR* Name)
+	{
+		return Object ? FindFProperty<FBoolProperty>(Object->GetClass(), Name) : nullptr;
 	}
 
 	/**
 	 * The window frame's mTabs: one {icon, title} entry per tab button. Grows it to two entries (ours second) or shrinks it
 	 * back to one, then has the frame rebuild its buttons. The entry fields have generated names (Texture_4_..., Text_5_...),
 	 * so they are found by prefix.
+	 * The two "override" flags make the frame lay the buttons out side by side and report clicks (OnTabButtonClicked) instead
+	 * of sliding the content itself, which needs a Widget_SlidingTabs that the uploader panel doesn't have.
+	 * Nothing is changed unless everything needed is there.
 	 */
 	bool SetSecondTab(UUserWidget* Window, const bool bWanted)
 	{
+		UUserWidget* Container = TabsContainer(Window);
+		const FBoolProperty* WindowFlag = FindBool(Window, TEXT("mOverwriteTabButtonFunctions"));
+		const FBoolProperty* ContainerFlag = FindBool(Container, TEXT("mOverrideButtonFunctions"));
 		FArrayProperty* TabsProperty = Window ? FindFProperty<FArrayProperty>(Window->GetClass(), TEXT("mTabs")) : nullptr;
 		FStructProperty* Inner = TabsProperty ? CastField<FStructProperty>(TabsProperty->Inner) : nullptr;
-		if (!Inner)
+		if (!WindowFlag || !ContainerFlag || !Inner || !Window->FindFunction(TEXT("InitTabs")))
 		{
 			return false;
 		}
 		FScriptArrayHelper Tabs(TabsProperty, TabsProperty->ContainerPtrToValuePtr<void>(Window));
-		const int32 Wanted = bWanted ? 2 : 1;
-		if (Tabs.Num() == Wanted || (!bWanted && Tabs.Num() < 2))
-		{
-			return true;
-		}
 		if (bWanted)
 		{
-			if (Tabs.Num() != 1)
+			if (Tabs.Num() < 1 || Tabs.Num() > 2)
 			{
 				return false; // not the layout this was written for; leave the panel alone
 			}
-			static TWeakObjectPtr<UTexture2D> IconCache;
-			UTexture2D* Icon = LoadCached(CouponIconPath, IconCache);
-			const FText Title = FText::FromStringTable(AwesomeTable, TEXT("AWESOMESink/WindowTitle"));
-			uint8* Entry = Tabs.GetRawPtr(Tabs.AddValue());
-			for (TFieldIterator<FProperty> It(Inner->Struct); It; ++It)
+			if (Tabs.Num() == 1)
 			{
-				const FString Name = It->GetName();
-				if (Name.StartsWith(TEXT("Texture_")))
+				static TWeakObjectPtr<UTexture2D> IconCache;
+				UTexture2D* Icon = LoadCached(CouponIconPath, IconCache);
+				const FText Title = FText::FromStringTable(AwesomeTable, TEXT("AWESOMESink/WindowTitle"));
+				uint8* Entry = Tabs.GetRawPtr(Tabs.AddValue());
+				for (TFieldIterator<FProperty> It(Inner->Struct); It; ++It)
 				{
-					if (FObjectPropertyBase* Object = CastField<FObjectPropertyBase>(*It)) // hard or soft reference
+					const FString Name = It->GetName();
+					if (Name.StartsWith(TEXT("Texture_")))
 					{
-						Object->SetObjectPropertyValue_InContainer(Entry, Icon);
+						if (FObjectPropertyBase* Object = CastField<FObjectPropertyBase>(*It)) // hard or soft reference
+						{
+							Object->SetObjectPropertyValue_InContainer(Entry, Icon);
+						}
 					}
-				}
-				else if (Name.StartsWith(TEXT("Text_")))
-				{
-					if (FTextProperty* Text = CastField<FTextProperty>(*It))
+					else if (Name.StartsWith(TEXT("Text_")))
 					{
-						Text->SetPropertyValue_InContainer(Entry, Title);
+						if (FTextProperty* Text = CastField<FTextProperty>(*It))
+						{
+							Text->SetPropertyValue_InContainer(Entry, Title);
+						}
 					}
 				}
 			}
 		}
 		else
 		{
-			Tabs.Resize(1);
+			if (Tabs.Num() < 2 && !WindowFlag->GetPropertyValue_InContainer(Window))
+			{
+				return true; // already as the game made it
+			}
+			Tabs.Resize(FMath::Min(Tabs.Num(), 1));
 		}
+		WindowFlag->SetPropertyValue_InContainer(Window, bWanted);
+		ContainerFlag->SetPropertyValue_InContainer(Container, bWanted);
 		return Reflection::Call(Window, TEXT("InitTabs"));
 	}
 
@@ -319,7 +340,8 @@ void USinkingDepotSinkPanel::ShowTab(const int32 Index)
 	ActiveTab = Index;
 	if (UWidget* Vanilla = VanillaContent.Get())
 	{
-		Vanilla->SetVisibility(Index == 0 ? VanillaVisibility : ESlateVisibility::Collapsed);
+		// Hidden, not collapsed: it keeps its size, so the window doesn't change shape between the tabs.
+		Vanilla->SetVisibility(Index == 0 ? VanillaVisibility : ESlateVisibility::Hidden);
 	}
 	SetVisibility(Index == 1 ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
 	if (Index == 1)
@@ -330,10 +352,23 @@ void USinkingDepotSinkPanel::ShowTab(const int32 Index)
 
 void USinkingDepotSinkPanel::OnTabClicked(const int32 ButtonIndex)
 {
-	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: the window reported tab button %d"), ButtonIndex);
-	if (Depot.IsValid())
+	const AFGPlayerController* Controller = Cast<AFGPlayerController>(GetOwningPlayer());
+	const bool bGamepad = Controller && Controller->GetIsUsingGamepad();
+	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: the window reported tab button %d, gamepad %d"), ButtonIndex, bGamepad);
+	if (!Depot.IsValid())
 	{
-		ShowTab(ButtonIndex == 1 ? 1 : 0);
+		return;
+	}
+	// The gamepad's previous/next tab buttons always report 0 here, because the frame reads its index from a sliding-tabs
+	// widget this panel doesn't have. With two tabs, previous and next both mean the other one.
+	const int32 Tab = bGamepad && ButtonIndex == 0 ? 1 - ActiveTab : (ButtonIndex == 1 ? 1 : 0);
+	ShowTab(Tab);
+	const TArray<UWidget*> Buttons = SinkingDepot::SinkTab::TabButtons(Window.Get());
+	if (Buttons.IsValidIndex(Tab))
+	{
+		// Moves the highlight; a mouse click has already done this, the gamepad buttons haven't.
+		SinkingDepot::Reflection::Call(SinkingDepot::SinkTab::TabsContainer(Window.Get()), TEXT("SetActiveButton"),
+			[&Buttons, Tab](UFunction* F, uint8* P) { SinkingDepot::Reflection::SetObject(F, P, TEXT("ActiveButton"), Buttons[Tab]); });
 	}
 }
 
@@ -492,7 +527,7 @@ void USinkingDepotSinkPanel::NativeConstruct()
 	Super::NativeConstruct();
 	if (UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().SetTimer(PollTimer, FTimerDelegate::CreateUObject(this, &USinkingDepotSinkPanel::Poll), 0.1f, true);
+		World->GetTimerManager().SetTimer(PollTimer, FTimerDelegate::CreateUObject(this, &USinkingDepotSinkPanel::Poll), 0.25f, true);
 	}
 }
 
@@ -507,18 +542,7 @@ void USinkingDepotSinkPanel::NativeDestruct()
 
 void USinkingDepotSinkPanel::Poll()
 {
-	UUserWidget* Frame = Window.Get();
-	if (!Frame || !Depot.IsValid())
-	{
-		return;
-	}
-	// Follows the frame's tab: covers mouse clicks and the gamepad's previous/next tab buttons alike.
-	const int32 Tab = SinkingDepot::SinkTab::GetActiveTabIndex(Frame) == 1 ? 1 : 0;
-	if (Tab != ActiveTab)
-	{
-		ShowTab(Tab);
-	}
-	else if (Tab == 1)
+	if (ActiveTab == 1 && Depot.IsValid())
 	{
 		Refresh();
 	}

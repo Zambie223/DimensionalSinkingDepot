@@ -25,7 +25,7 @@ namespace SinkingDepot::SinkTab
 /**
  * The AWESOME Sink tab's content, built in code: the game's own track progress widgets (Standard and DNA), the number of
  * coupons available, and a Print button that asks the server to print them all into the player's inventory.
- * It sits in an Overlay next to the uploader's own content; the window frame's tab index decides which one shows.
+ * It sits in an Overlay next to the uploader's own content; the window frame's tab buttons decide which one shows.
  */
 UCLASS(NotBlueprintable)
 class USinkingDepotSinkPanel : public UUserWidget
@@ -41,6 +41,7 @@ public:
 
 	void ShowPrintResult(int32 Printed, int32 StillAvailable, bool bRefused);
 
+	/** The window frame's OnTabButtonClicked: a tab was clicked, or a gamepad tab button pressed. */
 	UFUNCTION()
 	void OnTabClicked(int32 ButtonIndex);
 
@@ -56,7 +57,7 @@ private:
 	void BuildTree();
 	/** Gives the text blocks the vanilla panel's font (set by Setup), at sizes for this layout. */
 	void ApplyFont();
-	/** 10 times a second while the window is open: follows the frame's active tab and, on tab 1, refreshes the numbers. */
+	/** Four times a second while the window is open: refreshes the numbers if the sink tab is showing. */
 	void Poll();
 	void Refresh();
 
