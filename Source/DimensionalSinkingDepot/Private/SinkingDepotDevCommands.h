@@ -38,4 +38,11 @@ namespace SinkingDepot::Dev
 	 * opens a Sinking Depot's and an AWESOME Sink's panel and logs their live trees, with screenshots.
 	 */
 	void UIProbe(UWorld* World);
+
+	/**
+	 * -SinkingDepotSinkTabCheck (SinkingDepotSinkTabCheck.cpp), single player or host: 35 s in, self-checks the AWESOME
+	 * Sink tab (two tabs on a Sinking Depot, switching, printing coupons, a reused panel on a vanilla uploader) and logs
+	 * "[sinktab] CHECK ..." lines, "[sinktab] RESULT n/m" and screenshots SinkingDepotShowcase_sinktab_*.png.
+	 */
+	void SinkTabCheck(UWorld* World);
 }

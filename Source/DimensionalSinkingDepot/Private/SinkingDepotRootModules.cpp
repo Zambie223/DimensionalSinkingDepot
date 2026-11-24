@@ -5,11 +5,14 @@
 #include "SinkingDepotChatCommand.h"
 #include "SinkingDepotConstants.h"
 #include "SinkingDepotLog.h"
+#include "SinkingDepotRCO.h"
 #include "SinkingDepotSubsystem.h"
 
 USinkingDepotGameInstanceModule::USinkingDepotGameInstanceModule()
 {
 	bRootModule = true;
+	// The per-player channel the AWESOME Sink tab prints coupons through (SML registers it on every player controller).
+	RemoteCallObjects.Add(USinkingDepotRCO::StaticClass());
 }
 
 void USinkingDepotGameInstanceModule::DispatchLifecycleEvent(const ELifecyclePhase Phase)

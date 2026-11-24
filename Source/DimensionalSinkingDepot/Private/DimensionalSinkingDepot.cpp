@@ -3,6 +3,7 @@
 #include "SinkingDepotDevCommands.h"
 #include "SinkingDepotLog.h"
 #include "SinkingDepotOverflow.h"
+#include "SinkingDepotSinkTab.h"
 #include "SinkingDepotWindow.h"
 
 #include "Buildables/FGCentralStorageContainer.h"
@@ -15,6 +16,7 @@ void FDimensionalSinkingDepotModule::StartupModule()
 	// Native hooks only exist in the packaged game; the editor never runs factory ticks on real buildings.
 	SinkingDepot::Overflow::InstallHook();
 	SinkingDepot::Window::InstallHooks();
+	SinkingDepot::SinkTab::InstallHook(); // clients and listen hosts only
 #if !WITH_EDITOR
 	// One BeginPlay hook for everything our building needs, so vanilla uploaders pay a single class check.
 	SUBSCRIBE_METHOD_VIRTUAL_AFTER(AFGCentralStorageContainer::BeginPlay, GetMutableDefault<AFGCentralStorageContainer>(),
