@@ -33,12 +33,13 @@ void USinkingDepotRCO::Server_PrintCoupons_Implementation(AFGCentralStorageConta
 	if (!Depot || !SinkingDepot::IsSinkingDepot(Depot) || !Inventory || !Sink || !Sink->GetCouponClass())
 	{
 		UE_LOG(LogSinkingDepot, Warning, TEXT("Print coupons refused: depot %s, player %s, sink %d"), *GetNameSafe(Depot), *GetNameSafe(Player), Sink != nullptr);
+		Client_PrintResult(0, Sink ? Sink->GetNumCoupons() : 0, true);
 		return;
 	}
 	if (FVector::Dist(Player->GetActorLocation(), Depot->GetActorLocation()) > SinkingDepot::Rco::MaxPrintDistance)
 	{
 		UE_LOG(LogSinkingDepot, Warning, TEXT("Print coupons refused: %s is too far from %s"), *GetNameSafe(Player), *GetNameSafe(Depot));
-		Client_PrintResult(0, Sink->GetNumCoupons());
+		Client_PrintResult(0, Sink->GetNumCoupons(), true);
 		return;
 	}
 
@@ -50,10 +51,10 @@ void USinkingDepotRCO::Server_PrintCoupons_Implementation(AFGCentralStorageConta
 		Sink->AddResourceSinkCoupons(Removed - Added, false);
 	}
 	UE_LOG(LogSinkingDepot, Log, TEXT("Printed %d coupon(s) for %s at %s, %d still available"), Added, *GetNameSafe(Player), *GetNameSafe(Depot), Sink->GetNumCoupons());
-	Client_PrintResult(Added, Sink->GetNumCoupons());
+	Client_PrintResult(Added, Sink->GetNumCoupons(), false);
 }
 
-void USinkingDepotRCO::Client_PrintResult_Implementation(int32 Printed, int32 StillAvailable)
+void USinkingDepotRCO::Client_PrintResult_Implementation(int32 Printed, int32 StillAvailable, bool bRefused)
 {
-	SinkingDepot::SinkTab::OnPrintResult(Printed, StillAvailable);
+	SinkingDepot::SinkTab::OnPrintResult(Printed, StillAvailable, bRefused);
 }

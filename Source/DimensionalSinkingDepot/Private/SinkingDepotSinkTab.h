@@ -12,14 +12,14 @@ class UTextBlock;
 namespace SinkingDepot::SinkTab
 {
 	/**
-	 * Game clients and listen hosts (packaged game only): an after-hook on UFGInteractWidget::Native_Init that gives the
+	 * Game clients and listen hosts (packaged game only): an after-hook on UFGInteractWidget::Init that gives the
 	 * uploader panel (BPW_CentralStorage) a second tab, "AWESOME Sink", when it opens for a Dimensional Sinking Depot,
 	 * and removes it again if the game reuses that cached panel for a vanilla uploader.
 	 */
 	void InstallHook();
 
 	/** Called by the RCO on the client that asked to print: shows the result on the open sink tab, if any. */
-	void OnPrintResult(int32 Printed, int32 StillAvailable);
+	void OnPrintResult(int32 Printed, int32 StillAvailable, bool bRefused);
 }
 
 /**
@@ -33,13 +33,13 @@ class USinkingDepotSinkPanel : public UUserWidget
 	GENERATED_BODY()
 
 public:
-	/** Set by the hook each time the panel opens. TemplateFont: a font from the vanilla panel, so ours matches it. */
+	/** Set by the hook each time the panel opens (no building: a vanilla uploader reuses the window). TemplateFont: a font from the vanilla panel, so ours matches it. */
 	void Setup(AFGCentralStorageContainer* InDepot, UUserWidget* InWindow, UWidget* InVanillaContent, const FSlateFontInfo& InTemplateFont);
 
 	/** Shows tab 0 (the uploader's own content) or tab 1 (this panel). */
 	void ShowTab(int32 Index);
 
-	void ShowPrintResult(int32 Printed, int32 StillAvailable);
+	void ShowPrintResult(int32 Printed, int32 StillAvailable, bool bRefused);
 
 	UFUNCTION()
 	void OnTabClicked(int32 ButtonIndex);

@@ -3,6 +3,7 @@
 #include "SinkingDepotLog.h"
 #include "SinkingDepotOverflow.h"
 #include "SinkingDepotRCO.h"
+#include "SinkingDepotReflection.h"
 
 #include "Blueprint/WidgetTree.h"
 #include "Brushes/SlateColorBrush.h"
@@ -78,59 +79,13 @@ namespace
 		return Cache.Get();
 	}
 
-	/** Calls a Blueprint function with parameters filled in by Fill(Function, ParameterBuffer). False if it doesn't exist. */
-	bool CallBlueprint(UObject* Object, const TCHAR* FunctionName, TFunctionRef<void(UFunction*, uint8*)> Fill)
-	{
-		UFunction* Function = Object ? Object->FindFunction(FName(FunctionName)) : nullptr;
-		if (!Function)
-		{
-			return false;
-		}
-		uint8* Params = static_cast<uint8*>(FMemory_Alloca_Aligned(FMath::Max<int32>(Function->ParmsSize, 1), Function->GetMinAlignment()));
-		FMemory::Memzero(Params, Function->ParmsSize);
-		Function->InitializeStruct(Params);
-		Fill(Function, Params);
-		Object->ProcessEvent(Function, Params);
-		Function->DestroyStruct(Params);
-		return true;
-	}
-
-	/** Copies Value into the named parameter, if it exists with the expected size. */
-	template <typename T>
-	void SetParam(UFunction* Function, uint8* Params, const TCHAR* Name, const T& Value)
-	{
-		FProperty* Property = Function->FindPropertyByName(FName(Name));
-		if (Property && Property->GetSize() == sizeof(T))
-		{
-			Property->CopyCompleteValue(Property->ContainerPtrToValuePtr<void>(Params), &Value);
-		}
-	}
-
-	void SetBoolParam(UFunction* Function, uint8* Params, const TCHAR* Name, const bool bValue)
-	{
-		if (FBoolProperty* Property = CastField<FBoolProperty>(Function->FindPropertyByName(FName(Name))))
-		{
-			Property->SetPropertyValue_InContainer(Params, bValue);
-		}
-	}
-
 	int32 GetActiveTabIndex(UUserWidget* Window)
 	{
-		// GetActiveTabIndex returns through an out parameter, read back from the parameter buffer after the call.
 		int32 Index = 0;
-		UFunction* Function = Window ? Window->FindFunction(TEXT("GetActiveTabIndex")) : nullptr;
-		if (Function)
+		Reflection::Call(Window, TEXT("GetActiveTabIndex"), [](UFunction*, uint8*) {}, [&Index](UFunction* F, uint8* P)
 		{
-			uint8* Params = static_cast<uint8*>(FMemory_Alloca_Aligned(FMath::Max<int32>(Function->ParmsSize, 1), Function->GetMinAlignment()));
-			FMemory::Memzero(Params, Function->ParmsSize);
-			Function->InitializeStruct(Params);
-			Window->ProcessEvent(Function, Params);
-			if (FIntProperty* Out = CastField<FIntProperty>(Function->FindPropertyByName(TEXT("ActiveTabIndex"))))
-			{
-				Index = Out->GetPropertyValue_InContainer(Params);
-			}
-			Function->DestroyStruct(Params);
-		}
+			Index = Reflection::GetInt(F, P, TEXT("ActiveTabIndex"), 0);
+		});
 		return Index;
 	}
 
@@ -168,13 +123,9 @@ namespace
 				const FString Name = It->GetName();
 				if (Name.StartsWith(TEXT("Texture_")))
 				{
-					if (FObjectPropertyBase* Object = CastField<FObjectPropertyBase>(*It))
+					if (FObjectPropertyBase* Object = CastField<FObjectPropertyBase>(*It)) // hard or soft reference
 					{
 						Object->SetObjectPropertyValue_InContainer(Entry, Icon);
-					}
-					else if (FSoftObjectProperty* Soft = CastField<FSoftObjectProperty>(*It))
-					{
-						Soft->SetPropertyValue_InContainer(Entry, FSoftObjectPtr(Icon));
 					}
 				}
 				else if (Name.StartsWith(TEXT("Text_")))
@@ -190,8 +141,7 @@ namespace
 		{
 			Tabs.Resize(1);
 		}
-		CallBlueprint(Window, TEXT("InitTabs"), [](UFunction*, uint8*) {});
-		return true;
+		return Reflection::Call(Window, TEXT("InitTabs"));
 	}
 
 	/** Finds our panel if this window was given one before (the game caches interact widgets and reuses them). */
@@ -248,17 +198,31 @@ namespace
 	void OnPanelInit(UFGInteractWidget* Self)
 	{
 		UClass* UploaderWidget = UploaderWidgetClass();
-		if (!Self || !UploaderWidget || !Self->IsA(UploaderWidget) || !Self->WidgetTree)
+		if (!UploaderWidget)
 		{
+			static bool bLogged = false;
+			if (!bLogged)
+			{
+				bLogged = true;
+				UE_LOG(LogSinkingDepot, Warning, TEXT("Could not load %s; the AWESOME Sink tab is not added"), UploaderWidgetClassPath);
+			}
 			return;
 		}
-		UUserWidget* Window = Cast<UUserWidget>(Self->WidgetTree->FindWidget(WindowName));
+		if (!Self || !Self->IsA(UploaderWidget))
+		{
+			return; // some other panel
+		}
+		UUserWidget* Window = Self->WidgetTree ? Cast<UUserWidget>(Self->WidgetTree->FindWidget(WindowName)) : nullptr;
 		if (!Window)
 		{
 			UE_LOG(LogSinkingDepot, Warning, TEXT("Uploader panel has no %s; the AWESOME Sink tab is not added"), *WindowName.ToString());
 			return;
 		}
 		AFGCentralStorageContainer* Depot = Cast<AFGCentralStorageContainer>(Self->mInteractObject);
+		if (!Depot)
+		{
+			UE_LOG(LogSinkingDepot, Warning, TEXT("Uploader panel opened without a building (%s); no AWESOME Sink tab"), *GetNameSafe(Self->mInteractObject));
+		}
 		USinkingDepotSinkPanel* Panel = FindPanel(Window);
 		if (!SinkingDepot::IsSinkingDepot(Depot))
 		{
@@ -266,6 +230,7 @@ namespace
 			if (Panel)
 			{
 				Panel->ShowTab(0);
+				Panel->Setup(nullptr, Window, nullptr, FSlateFontInfo()); // stops it following the tabs
 				SetSecondTab(Window, false);
 			}
 			return;
@@ -286,7 +251,11 @@ namespace
 			Font = FontSource->GetFont();
 		}
 		Panel->Setup(Depot, Window, VanillaContent, Font);
-		if (!SetSecondTab(Window, true))
+		if (SetSecondTab(Window, true))
+		{
+			UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab added for %s"), *GetNameSafe(Depot));
+		}
+		else
 		{
 			UE_LOG(LogSinkingDepot, Warning, TEXT("The uploader window's tab list has an unexpected layout; the AWESOME Sink tab is not shown"));
 		}
@@ -302,7 +271,9 @@ void SinkingDepot::SinkTab::InstallHook()
 	{
 		return; // no UI on a dedicated server
 	}
-	SUBSCRIBE_METHOD_AFTER(UFGInteractWidget::Native_Init, [](UFGInteractWidget* Self)
+	// Not Native_Init: the shipping game inlines it into NativeConstruct, so a hook on it never runs for a panel that opens
+	// normally. Both that path and the delayed one (NativeTestAndQueueInit) end in Init.
+	SUBSCRIBE_METHOD_AFTER(UFGInteractWidget::Init, [](UFGInteractWidget* Self)
 	{
 		SinkingDepot::SinkTab::OnPanelInit(Self);
 	});
@@ -310,11 +281,11 @@ void SinkingDepot::SinkTab::InstallHook()
 #endif
 }
 
-void SinkingDepot::SinkTab::OnPrintResult(const int32 Printed, const int32 StillAvailable)
+void SinkingDepot::SinkTab::OnPrintResult(const int32 Printed, const int32 StillAvailable, const bool bRefused)
 {
 	if (USinkingDepotSinkPanel* Panel = GPrintingPanel.Get())
 	{
-		Panel->ShowPrintResult(Printed, StillAvailable);
+		Panel->ShowPrintResult(Printed, StillAvailable, bRefused);
 	}
 }
 
@@ -382,14 +353,18 @@ void USinkingDepotSinkPanel::OnPrintClicked()
 	Rco->Server_PrintCoupons(Depot.Get());
 }
 
-void USinkingDepotSinkPanel::ShowPrintResult(const int32 Printed, const int32 StillAvailable)
+void USinkingDepotSinkPanel::ShowPrintResult(const int32 Printed, const int32 StillAvailable, const bool bRefused)
 {
 	if (!StatusText)
 	{
 		return;
 	}
 	FText Message;
-	if (Printed > 0)
+	if (bRefused)
+	{
+		Message = LOCTEXT("SinkTabRefused", "The server refused to print. Move closer to the building and try again.");
+	}
+	else if (Printed > 0)
 	{
 		Message = FText::Format(LOCTEXT("SinkTabPrinted", "Printed {0} {0}|plural(one=coupon,other=coupons) into your inventory."), FText::AsNumber(Printed));
 	}
@@ -451,14 +426,13 @@ void USinkingDepotSinkPanel::BuildTree()
 		static TWeakObjectPtr<UTexture2D> DnaIconCache;
 		UTexture2D* DnaIcon = SinkingDepot::SinkTab::LoadCached(SinkingDepot::SinkTab::DnaIconPath, DnaIconCache);
 		const FText DnaName = FText::FromStringTable(SinkingDepot::SinkTab::AwesomeTable, TEXT("AWESOMESink/PointsUntilNextCoupon/DNA"));
-		using SinkingDepot::SinkTab::CallBlueprint;
-		using SinkingDepot::SinkTab::SetParam;
-		CallBlueprint(DnaTrack, TEXT("SetColor"), [](UFunction* F, uint8* P) { SetParam(F, P, TEXT("mColor"), SinkingDepot::SinkTab::DnaColor); });
+		namespace Reflection = SinkingDepot::Reflection;
+		Reflection::Call(DnaTrack, TEXT("SetColor"), [](UFunction* F, uint8* P) { Reflection::SetColor(F, P, TEXT("mColor"), SinkingDepot::SinkTab::DnaColor); });
 		if (DnaIcon)
 		{
-			CallBlueprint(DnaTrack, TEXT("SetIcon"), [DnaIcon](UFunction* F, uint8* P) { SetParam(F, P, TEXT("mIcon"), DnaIcon); });
+			Reflection::Call(DnaTrack, TEXT("SetIcon"), [DnaIcon](UFunction* F, uint8* P) { Reflection::SetObject(F, P, TEXT("mIcon"), DnaIcon); });
 		}
-		CallBlueprint(DnaTrack, TEXT("SetCurrentPointsName"), [&DnaName](UFunction* F, uint8* P) { SetParam(F, P, TEXT("mCurrentPointsName"), DnaName); });
+		Reflection::Call(DnaTrack, TEXT("SetCurrentPointsName"), [&DnaName](UFunction* F, uint8* P) { Reflection::SetText(F, P, TEXT("mCurrentPointsName"), DnaName); });
 	}
 	else
 	{
@@ -556,8 +530,7 @@ void USinkingDepotSinkPanel::Refresh()
 	{
 		return;
 	}
-	using SinkingDepot::SinkTab::CallBlueprint;
-	using SinkingDepot::SinkTab::SetParam;
+	namespace Reflection = SinkingDepot::Reflection;
 	const EResourceSinkTrack Tracks[2] = {EResourceSinkTrack::RST_Default, EResourceSinkTrack::RST_Exploration};
 	UUserWidget* Widgets[2] = {StandardTrack.Get(), DnaTrack.Get()};
 	for (int32 Index = 0; Index < 2; ++Index)
@@ -570,12 +543,11 @@ void USinkingDepotSinkPanel::Refresh()
 		}
 		LastPoints[Index] = Points;
 		LastProgress[Index] = Progress;
-		CallBlueprint(Widgets[Index], TEXT("SetPointsToNext"), [Points](UFunction* F, uint8* P) { SetParam(F, P, TEXT("mPointsToNext"), Points); });
-		const double Progression = Progress;
-		CallBlueprint(Widgets[Index], TEXT("SetProgression"), [Progression](UFunction* F, uint8* P)
+		Reflection::Call(Widgets[Index], TEXT("SetPointsToNext"), [Points](UFunction* F, uint8* P) { Reflection::SetInt64(F, P, TEXT("mPointsToNext"), Points); });
+		Reflection::Call(Widgets[Index], TEXT("SetProgression"), [Progress](UFunction* F, uint8* P)
 		{
-			SetParam(F, P, TEXT("mProgression"), Progression);
-			SinkingDepot::SinkTab::SetBoolParam(F, P, TEXT("ForceProgressBarWrap"), false);
+			Reflection::SetDouble(F, P, TEXT("mProgression"), Progress);
+			Reflection::SetBool(F, P, TEXT("ForceProgressBarWrap"), false);
 		});
 	}
 

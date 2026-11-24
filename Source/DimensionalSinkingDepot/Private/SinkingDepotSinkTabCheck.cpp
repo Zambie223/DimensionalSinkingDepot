@@ -9,6 +9,7 @@
 
 #include "SinkingDepotConstants.h"
 #include "SinkingDepotLog.h"
+#include "SinkingDepotReflection.h"
 #include "SinkingDepotSinkTab.h"
 
 #include "Blueprint/WidgetTree.h"
@@ -147,14 +148,7 @@ namespace
 	/** What the gamepad's next/previous tab buttons do (the frame's own handlers). */
 	void PressTab(UUserWidget* Window, const bool bNext)
 	{
-		if (UFunction* Function = Window ? Window->FindFunction(bNext ? TEXT("HandleNextTab") : TEXT("HandlePreviousTab")) : nullptr)
-		{
-			uint8* Params = static_cast<uint8*>(FMemory_Alloca_Aligned(FMath::Max<int32>(Function->ParmsSize, 1), Function->GetMinAlignment()));
-			FMemory::Memzero(Params, Function->ParmsSize);
-			Function->InitializeStruct(Params);
-			Window->ProcessEvent(Function, Params);
-			Function->DestroyStruct(Params);
-		}
+		Reflection::Call(Window, bNext ? TEXT("HandleNextTab") : TEXT("HandlePreviousTab"));
 	}
 
 	bool Shown(const UWidget* Widget)
@@ -266,6 +260,11 @@ namespace
 			Check(TEXT("1 window has two tabs"), TabCount(Window) == 2, FString::Printf(TEXT("tabs %d"), TabCount(Window)));
 			Check(TEXT("1 starts on the uploader tab"), Panel && !Shown(Panel) && Shown(VanillaContentOf(Window)), FString::Printf(TEXT("panel %d, panel shown %d, vanilla shown %d"), Panel != nullptr, Shown(Panel), Shown(VanillaContentOf(Window))));
 			Shot(TEXT("1_open"));
+			if (!Panel)
+			{
+				Finish(W); // nothing to drive
+				return;
+			}
 			Then(W, 1.0f, Step2Tabs);
 		});
 	}

@@ -25,9 +25,9 @@ public:
 	UFUNCTION(Server, Reliable)
 	void Server_PrintCoupons(AFGCentralStorageContainer* Depot);
 
-	/** The server's answer: how many coupons went into the inventory and how many are still available. */
+	/** The server's answer, always sent: how many coupons were printed, how many are left, and whether it was refused. */
 	UFUNCTION(Client, Reliable)
-	void Client_PrintResult(int32 Printed, int32 StillAvailable);
+	void Client_PrintResult(int32 Printed, int32 StillAvailable, bool bRefused);
 
 private:
 	/** Remote call objects need a replicated property (the game's own RCOs carry one too). */
