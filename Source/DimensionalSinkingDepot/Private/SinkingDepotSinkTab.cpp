@@ -228,10 +228,10 @@ namespace
 		}
 		for (UWidget* Child : {Body, static_cast<UWidget*>(Panel)})
 		{
-			if (UOverlaySlot* Slot = Overlay->AddChildToOverlay(Child)) // AddChild takes Body out of the named slot first
+			if (UOverlaySlot* NewSlot = Overlay->AddChildToOverlay(Child)) // AddChild takes Body out of the named slot first
 			{
-				Slot->SetHorizontalAlignment(HAlign_Fill);
-				Slot->SetVerticalAlignment(VAlign_Fill);
+				NewSlot->SetHorizontalAlignment(HAlign_Fill);
+				NewSlot->SetVerticalAlignment(VAlign_Fill);
 			}
 		}
 		Window->SetContentForSlot(WindowBodySlot, Overlay);
@@ -419,25 +419,25 @@ void USinkingDepotSinkPanel::BuildTree()
 	// A dark backdrop like the uploader's own, so nothing of the hidden content area shows through.
 	UImage* Backdrop = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("Backdrop"));
 	Backdrop->SetColorAndOpacity(FLinearColor(0.012f, 0.012f, 0.012f, 1.0f));
-	if (UOverlaySlot* Slot = Root->AddChildToOverlay(Backdrop))
+	if (UOverlaySlot* NewSlot = Root->AddChildToOverlay(Backdrop))
 	{
-		Slot->SetHorizontalAlignment(HAlign_Fill);
-		Slot->SetVerticalAlignment(VAlign_Fill);
+		NewSlot->SetHorizontalAlignment(HAlign_Fill);
+		NewSlot->SetVerticalAlignment(VAlign_Fill);
 	}
 
 	UVerticalBox* Column = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("Column"));
-	if (UOverlaySlot* Slot = Root->AddChildToOverlay(Column))
+	if (UOverlaySlot* NewSlot = Root->AddChildToOverlay(Column))
 	{
-		Slot->SetHorizontalAlignment(HAlign_Fill);
-		Slot->SetVerticalAlignment(VAlign_Center);
-		Slot->SetPadding(FMargin(20.0f, 16.0f));
+		NewSlot->SetHorizontalAlignment(HAlign_Fill);
+		NewSlot->SetVerticalAlignment(VAlign_Center);
+		NewSlot->SetPadding(FMargin(20.0f, 16.0f));
 	}
-	auto Add = [Column](UWidget* Widget, const FMargin& Padding, const EHorizontalAlignment Align)
+	auto Add = [Column](UWidget* Widget, const FMargin& CellPadding, const EHorizontalAlignment Align)
 	{
-		if (UVerticalBoxSlot* Slot = Column->AddChildToVerticalBox(Widget))
+		if (UVerticalBoxSlot* NewSlot = Column->AddChildToVerticalBox(Widget))
 		{
-			Slot->SetPadding(Padding);
-			Slot->SetHorizontalAlignment(Align);
+			NewSlot->SetPadding(CellPadding);
+			NewSlot->SetHorizontalAlignment(Align);
 		}
 	};
 
