@@ -45,4 +45,7 @@ namespace SinkingDepot::Dev
 	 * "[sinktab] CHECK ..." lines, "[sinktab] RESULT n/m" and screenshots SinkingDepotShowcase_sinktab_*.png.
 	 */
 	void SinkTabCheck(UWorld* World);
+
+	/** -SinkingDepotTabLab: diagnostic for the window frame's tabs; logs "[tablab] ..." lines, ending with "[tablab] done". */
+	void TabLab(UWorld* World);
 }

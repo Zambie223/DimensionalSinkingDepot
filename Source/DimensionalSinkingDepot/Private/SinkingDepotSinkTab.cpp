@@ -330,6 +330,7 @@ void USinkingDepotSinkPanel::ShowTab(const int32 Index)
 
 void USinkingDepotSinkPanel::OnTabClicked(const int32 ButtonIndex)
 {
+	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: the window reported tab button %d"), ButtonIndex);
 	if (Depot.IsValid())
 	{
 		ShowTab(ButtonIndex == 1 ? 1 : 0);
