@@ -43,7 +43,7 @@ namespace
 		}
 	}
 
-	void After(UWorld* World, const float Delay, TFunction<void(UWorld*)> Function)
+	void Later(UWorld* World, const float Delay, TFunction<void(UWorld*)> Function)
 	{
 		const TWeakObjectPtr<UWorld> WeakWorld(World);
 		FTimerHandle Handle;
@@ -179,12 +179,26 @@ namespace
 		}
 	}
 
-	UClass* InteractWidgetOf(const TCHAR* BuildClassPath)
+	/**
+	 * The building's interact widget class. AFGBuildable::GetInteractWidgetClass is protected, so this reads the
+	 * mInteractWidgetSoftClass UPROPERTY through reflection (no access transformer needed for a dev probe).
+	 */
+	UClass* InteractWidgetClass(const AFGBuildable* Buildable)
 	{
-		UClass* Build = LoadClass<AFGBuildable>(nullptr, BuildClassPath);
-		const AFGBuildable* Default = Build ? Build->GetDefaultObject<AFGBuildable>() : nullptr;
-		UClass* Widget = Default ? Default->GetInteractWidgetClass().Get() : nullptr;
-		Line(FString::Printf(TEXT("interact widget of %s: %s"), BuildClassPath, Widget ? *Widget->GetPathName() : TEXT("(none)")));
+		static const FSoftClassProperty* Property = FindFProperty<FSoftClassProperty>(AFGBuildable::StaticClass(), TEXT("mInteractWidgetSoftClass"));
+		if (!Property || !Buildable)
+		{
+			Line(FString::Printf(TEXT("interact widget lookup: property found %d, buildable %d"), Property != nullptr, Buildable != nullptr));
+			return nullptr;
+		}
+		return Cast<UClass>(Property->GetPropertyValue_InContainer(Buildable).LoadSynchronous());
+	}
+
+	UClass* InteractWidgetOf(const TCHAR* ClassPath)
+	{
+		UClass* Build = LoadClass<AFGBuildable>(nullptr, ClassPath);
+		UClass* Widget = InteractWidgetClass(Build ? Build->GetDefaultObject<AFGBuildable>() : nullptr);
+		Line(FString::Printf(TEXT("interact widget of %s: %s"), ClassPath, Widget ? *Widget->GetPathName() : TEXT("(none)")));
 		return Widget;
 	}
 
@@ -275,8 +289,8 @@ namespace
 			Then(World);
 			return;
 		}
-		Hud->OpenInteractUI(Building->GetInteractWidgetClass(), Building);
-		After(World, 3.0f, [WeakBuilding = TWeakObjectPtr<AFGBuildable>(Building), Name, Then = MoveTemp(Then)](UWorld* W) mutable
+		Hud->OpenInteractUI(InteractWidgetClass(Building), Building);
+		Later(World, 3.0f, [WeakBuilding = TWeakObjectPtr<AFGBuildable>(Building), Name, Then = MoveTemp(Then)](UWorld* W) mutable
 		{
 			UFGGameUI* Ui = GameUI(W);
 			UFGInteractWidget* Open = nullptr;
@@ -296,13 +310,13 @@ namespace
 				DumpWidget(Open, 1, true);
 			}
 			FScreenshotRequest::RequestScreenshot(FString::Printf(TEXT("SinkingDepotShowcase_uiprobe_%s.png"), *Name), true, false);
-			After(W, 2.0f, [Open = TWeakObjectPtr<UFGInteractWidget>(Open), Then = MoveTemp(Then)](UWorld* W2)
+			Later(W, 2.0f, [Open = TWeakObjectPtr<UFGInteractWidget>(Open), Then = MoveTemp(Then)](UWorld* W2)
 			{
 				if (UFGGameUI* Ui2 = GameUI(W2); Ui2 && Open.IsValid())
 				{
 					Ui2->PopWidget(Open.Get());
 				}
-				After(W2, 2.0f, Then);
+				Later(W2, 2.0f, Then);
 			});
 		});
 	}
@@ -324,7 +338,7 @@ namespace
 		AFGBuildable* Ours = Spawn(World, BuildClassPath, Base - Right * 800.0f, Yaw + 180.0f);
 		AFGBuildable* Sink = Spawn(World, ResourceSinkBuildClassPath, Base + Right * 1200.0f, Yaw + 180.0f);
 		Line(FString::Printf(TEXT("spawned %s and %s"), *GetNameSafe(Ours), *GetNameSafe(Sink)));
-		After(World, 3.0f, [WeakOurs = TWeakObjectPtr<AFGBuildable>(Ours), WeakSink = TWeakObjectPtr<AFGBuildable>(Sink)](UWorld* W)
+		Later(World, 3.0f, [WeakOurs = TWeakObjectPtr<AFGBuildable>(Ours), WeakSink = TWeakObjectPtr<AFGBuildable>(Sink)](UWorld* W)
 		{
 			OpenDumpClose(W, WeakOurs.Get(), TEXT("depot"), [WeakSink](UWorld* W2)
 			{
@@ -341,16 +355,15 @@ namespace
 
 void SinkingDepot::Dev::UIProbe(UWorld* World)
 {
-	using namespace SinkingDepot::UIProbe;
 	if (!World || World->GetNetMode() == NM_DedicatedServer)
 	{
 		return;
 	}
 	UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotUIProbe: starts in 35 s"));
-	After(World, 35.0f, [](UWorld* W)
+	SinkingDepot::UIProbe::Later(World, 35.0f, [](UWorld* W)
 	{
-		StaticPart();
-		LivePart(W);
+		SinkingDepot::UIProbe::StaticPart();
+		SinkingDepot::UIProbe::LivePart(W);
 	});
 }
 
