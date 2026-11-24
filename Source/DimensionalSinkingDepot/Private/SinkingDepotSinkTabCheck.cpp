@@ -196,7 +196,11 @@ namespace
 		return Rects.Num();
 	}
 
-	/** A left click fed into Slate at the middle of Widget, hit-tested like a real one. The OS cursor isn't moved. */
+	/**
+	 * A left click fed into Slate at the middle of Widget, hit-tested like a real one. The OS cursor isn't moved.
+	 * Slate refuses the mouse capture a button click needs while the application isn't active (FSlateApplication::ProcessReply),
+	 * and the test window never is, so that rule is lifted for just these three events.
+	 */
 	void ClickWidget(const UWidget* Widget)
 	{
 		if (!Widget || !FSlateApplication::IsInitialized())
@@ -210,10 +214,13 @@ namespace
 		const FModifierKeysState NoModifiers;
 		const TSet<FKey> NoButtons;
 		const TSet<FKey> LeftDown = {EKeys::LeftMouseButton};
+		const bool bOldInactiveInput = Slate.GetHandleDeviceInputWhenApplicationNotActive();
+		Slate.SetHandleDeviceInputWhenApplicationNotActive(true);
 		Slate.ProcessMouseMoveEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::Invalid, 0.0f, NoModifiers));
 		Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(0, 0, At, At, LeftDown, EKeys::LeftMouseButton, 0.0f, NoModifiers));
 		Slate.ProcessMouseButtonUpEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::LeftMouseButton, 0.0f, NoModifiers));
-		UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s"), *GetNameSafe(Widget), *At.ToString());
+		Slate.SetHandleDeviceInputWhenApplicationNotActive(bOldInactiveInput);
+		UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s (application active %d)"), *GetNameSafe(Widget), *At.ToString(), Slate.IsActive());
 	}
 
 	void ClickTab(UWorld* World, const int32 Index)
@@ -401,8 +408,13 @@ namespace
 							Then(W5, 1.0f, [](UWorld* W6)
 							{
 								CheckTab(W6, TEXT("2 gamepad left bumper goes back"), 0);
-								ClickTab(W6, 1); // stay on the sink tab for the print steps
-								Then(W6, 1.5f, Step3Print);
+								PressKey(EKeys::Gamepad_LeftShoulder);
+								Then(W6, 1.0f, [](UWorld* W7)
+								{
+									CheckTab(W7, TEXT("2 left bumper on the first tab changes nothing"), 0);
+									ClickTab(W7, 1); // stay on the sink tab for the print steps
+									Then(W7, 1.5f, Step3Print);
+								});
 							});
 						});
 					});

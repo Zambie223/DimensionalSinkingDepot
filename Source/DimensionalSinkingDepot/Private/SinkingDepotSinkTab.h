@@ -41,6 +41,9 @@ public:
 
 	void ShowPrintResult(int32 Printed, int32 StillAvailable, bool bRefused);
 
+	/** The gamepad's previous-tab button, which the window frame doesn't report here. True if it was used. */
+	bool OnGamepadPreviousTab();
+
 	/** The window frame's OnTabButtonClicked: a tab was clicked, or a gamepad tab button pressed. */
 	UFUNCTION()
 	void OnTabClicked(int32 ButtonIndex);
@@ -60,6 +63,8 @@ private:
 	/** Four times a second while the window is open: refreshes the numbers if the sink tab is showing. */
 	void Poll();
 	void Refresh();
+	/** ShowTab, and moves the frame's tab highlight. */
+	void SelectTab(int32 Index);
 
 	UPROPERTY()
 	TObjectPtr<UUserWidget> StandardTrack;
@@ -81,6 +86,7 @@ private:
 	FSlateFontInfo TemplateFont;
 	bool bHasTemplateFont = false;
 
+	TSharedPtr<class IInputProcessor> TabInput;
 	FTimerHandle PollTimer;
 	int32 ActiveTab = 0;
 	int32 LastCoupons = -1;

@@ -20,6 +20,9 @@
 #include "Engine/World.h"
 #include "FGPlayerController.h"
 #include "FGResourceSinkSubsystem.h"
+#include "Framework/Application/IInputProcessor.h"
+#include "Framework/Application/SlateApplication.h"
+#include "InputCoreTypes.h"
 #include "Patching/NativeHookManager.h"
 #include "TimerManager.h"
 #include "UI/FGInteractWidget.h"
@@ -61,6 +64,27 @@ namespace
 		}
 		return Cache.Get();
 	}
+
+	/**
+	 * While a panel of ours is open: the gamepad's left bumper goes back from the sink tab. The window frame handles the right
+	 * bumper itself, but never reports the left one, because the index it steps back from is always 0 in this panel.
+	 */
+	class FTabInput final : public IInputProcessor
+	{
+	public:
+		explicit FTabInput(USinkingDepotSinkPanel* InPanel) : Panel(InPanel) {}
+
+		virtual void Tick(const float, FSlateApplication&, TSharedRef<ICursor>) override {}
+
+		virtual bool HandleKeyDownEvent(FSlateApplication&, const FKeyEvent& Event) override
+		{
+			USinkingDepotSinkPanel* Target = Panel.Get();
+			return Target && Event.GetKey() == EKeys::Gamepad_LeftShoulder && !Event.IsRepeat() && Target->OnGamepadPreviousTab();
+		}
+
+	private:
+		TWeakObjectPtr<USinkingDepotSinkPanel> Panel;
+	};
 
 	UClass* UploaderWidgetClass()
 	{
@@ -359,16 +383,31 @@ void USinkingDepotSinkPanel::OnTabClicked(const int32 ButtonIndex)
 	{
 		return;
 	}
-	// The gamepad's previous/next tab buttons always report 0 here, because the frame reads its index from a sliding-tabs
-	// widget this panel doesn't have. With two tabs, previous and next both mean the other one.
-	const int32 Tab = bGamepad && ButtonIndex == 0 ? 1 - ActiveTab : (ButtonIndex == 1 ? 1 : 0);
-	ShowTab(Tab);
+	// The gamepad's next-tab button always reports 0 here, because the frame reads its index from a sliding-tabs
+	// widget this panel doesn't have. With two tabs, next means the other one.
+	SelectTab(bGamepad && ButtonIndex == 0 ? 1 - ActiveTab : (ButtonIndex == 1 ? 1 : 0));
+}
+
+bool USinkingDepotSinkPanel::OnGamepadPreviousTab()
+{
+	if (ActiveTab != 1 || !Depot.IsValid())
+	{
+		return false;
+	}
+	UE_LOG(LogSinkingDepot, Verbose, TEXT("AWESOME Sink tab: gamepad previous tab"));
+	SelectTab(0);
+	return true;
+}
+
+void USinkingDepotSinkPanel::SelectTab(const int32 Index)
+{
+	ShowTab(Index);
 	const TArray<UWidget*> Buttons = SinkingDepot::SinkTab::TabButtons(Window.Get());
-	if (Buttons.IsValidIndex(Tab))
+	if (Buttons.IsValidIndex(Index))
 	{
 		// Moves the highlight; a mouse click has already done this, the gamepad buttons haven't.
 		SinkingDepot::Reflection::Call(SinkingDepot::SinkTab::TabsContainer(Window.Get()), TEXT("SetActiveButton"),
-			[&Buttons, Tab](UFunction* F, uint8* P) { SinkingDepot::Reflection::SetObject(F, P, TEXT("ActiveButton"), Buttons[Tab]); });
+			[&Buttons, Index](UFunction* F, uint8* P) { SinkingDepot::Reflection::SetObject(F, P, TEXT("ActiveButton"), Buttons[Index]); });
 	}
 }
 
@@ -525,6 +564,11 @@ void USinkingDepotSinkPanel::ApplyFont()
 void USinkingDepotSinkPanel::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (FSlateApplication::IsInitialized() && !TabInput.IsValid())
+	{
+		TabInput = MakeShared<SinkingDepot::SinkTab::FTabInput>(this);
+		FSlateApplication::Get().RegisterInputPreProcessor(TabInput);
+	}
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimer(PollTimer, FTimerDelegate::CreateUObject(this, &USinkingDepotSinkPanel::Poll), 0.25f, true);
@@ -533,6 +577,11 @@ void USinkingDepotSinkPanel::NativeConstruct()
 
 void USinkingDepotSinkPanel::NativeDestruct()
 {
+	if (FSlateApplication::IsInitialized() && TabInput.IsValid())
+	{
+		FSlateApplication::Get().UnregisterInputPreProcessor(TabInput);
+	}
+	TabInput.Reset();
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(PollTimer);
