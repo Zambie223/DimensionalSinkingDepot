@@ -22,6 +22,8 @@
 #include "FGPlayerController.h"
 #include "Framework/Application/SlateApplication.h"
 #include "InputCoreTypes.h"
+#include "Framework/Application/SlateUser.h"
+#include "Layout/WidgetPath.h"
 #include "FGBuildableSubsystem.h"
 #include "FGCharacterPlayer.h"
 #include "FGHUD.h"
@@ -221,6 +223,59 @@ namespace
 		return FVector2D((Rect.Left + Rect.Right) * 0.5, (Rect.Top + Rect.Bottom) * 0.5);
 	}
 
+	bool UsingGamepad(UWorld* World);
+	void DumpTabs(UWorld* World, const TCHAR* Label, const AActor* Building);
+
+	/** UMG names for the Slate widgets of Root's tree, nested user widgets included (shipping has no reflection metadata). */
+	void CollectNames(UUserWidget* Root, TMap<const SWidget*, FString>& Names, const int32 Depth = 0)
+	{
+		if (!Root || !Root->WidgetTree || Depth > 6)
+		{
+			return;
+		}
+		if (const TSharedPtr<SWidget> Own = Root->GetCachedWidget())
+		{
+			Names.Add(Own.Get(), Root->GetName());
+		}
+		Root->WidgetTree->ForEachWidget([&Names, Depth](UWidget* Widget)
+		{
+			if (const TSharedPtr<SWidget> Cached = Widget->GetCachedWidget())
+			{
+				Names.Add(Cached.Get(), Widget->GetName());
+			}
+			CollectNames(Cast<UUserWidget>(Widget), Names, Depth + 1);
+		});
+	}
+
+	/** What Slate would hit at At (the innermost widgets), who holds the mouse, and who has focus. Diagnostics only. */
+	void LogUnder(UWorld* World, const TCHAR* When, const FVector2D& At)
+	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		TMap<const SWidget*, FString> Names;
+		CollectNames(OpenWidgetFor(World, GOurs.Get()), Names);
+		auto Describe = [&Names](const SWidget* Widget) -> FString
+		{
+			if (!Widget)
+			{
+				return TEXT("none");
+			}
+			const FString* Name = Names.Find(Widget);
+			return FString::Printf(TEXT("%s%s%s"), *Widget->GetTypeAsString(), Name ? *FString::Printf(TEXT(" '%s'"), **Name) : TEXT(""),
+				Widget->IsEnabled() ? TEXT("") : TEXT(" [disabled]"));
+		};
+		const FWidgetPath Path = Slate.LocateWindowUnderMouse(At, Slate.GetInteractiveTopLevelWindows(), true);
+		FString Chain;
+		for (int32 Index = FMath::Max(0, Path.Widgets.Num() - 8); Index < Path.Widgets.Num(); ++Index)
+		{
+			Chain += TEXT(" > ") + Describe(&Path.Widgets[Index].Widget.Get());
+		}
+		const TSharedPtr<FSlateUser> User = Slate.GetCursorUser();
+		const TSharedPtr<SWidget> Captor = User ? User->GetCursorCaptor() : nullptr;
+		const TSharedPtr<SWidget> Focus = Slate.GetUserFocusedWidget(0);
+		UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab]   %s, under %s: %d deep%s | mouse captor %s | focus %s | gamepad %d"), When, *At.ToString(), Path.Widgets.Num(), *Chain,
+			*Describe(Captor.Get()), *Describe(Focus.Get()), UsingGamepad(World));
+	}
+
 	/**
 	 * Like a player: the pointer moves onto the widget first, then, a moment later (the game may switch from gamepad to mouse
 	 * layout on that move), it clicks the widget where it is drawn now. Find is asked again for the click.
@@ -234,6 +289,7 @@ namespace
 			return;
 		}
 		const FVector2D First = Middle(Widget);
+		LogUnder(World, TEXT("before the move"), First);
 		SendMouse(First, false);
 		Then(World, 0.3f, [Find = MoveTemp(Find), First](UWorld* W)
 		{
@@ -244,6 +300,7 @@ namespace
 				return;
 			}
 			const FVector2D At = Middle(Target);
+			LogUnder(W, TEXT("before the click"), At);
 			SendMouse(At, true);
 			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s (moved onto it at %s; application active %d)"), *GetNameSafe(Target), *At.ToString(), *First.ToString(), FSlateApplication::Get().IsActive());
 		});
@@ -402,6 +459,7 @@ namespace
 
 	void Step3Print(UWorld* World)
 	{
+		DumpTabs(World, TEXT("P3 after the click after gamepad use"), GOurs.Get());
 		CheckTab(World, TEXT("3 the sink tab is showing before Print"), 1);
 		const int32 Before = CouponsInInventory(World);
 		ClickPrint(World);
@@ -421,6 +479,7 @@ namespace
 
 	void Step2Tabs(UWorld* World)
 	{
+		DumpTabs(World, TEXT("C2 before the first tab click"), GOurs.Get());
 		ClickTab(World, 1);
 		Then(World, 1.0f, [](UWorld* W)
 		{
@@ -452,6 +511,7 @@ namespace
 								Then(W6, 1.0f, [](UWorld* W7)
 								{
 									CheckTab(W7, TEXT("2 left bumper on the first tab changes nothing"), 0);
+									DumpTabs(W7, TEXT("G7 after the bumpers"), GOurs.Get());
 									ClickTab(W7, 1); // stay on the sink tab for the print steps (a click after gamepad use)
 									Then(W7, 1.5f, Step3Print);
 								});
