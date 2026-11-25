@@ -198,7 +198,12 @@ namespace
 		return Rects.Num();
 	}
 
-	void SendMouse(const FVector2D& At, const bool bClick)
+	/**
+	 * A mouse move from From to At, then (bClick) a left click at At. The move needs a real distance: the game only treats
+	 * a move with a non-zero cursor delta as the player switching from gamepad to mouse, and a click that arrives while the
+	 * game still thinks a gamepad is in use is spent on that switch instead (seen in game, check6).
+	 */
+	void SendMouse(const FVector2D& From, const FVector2D& At, const bool bClick)
 	{
 		FSlateApplication& Slate = FSlateApplication::Get();
 		const FModifierKeysState NoModifiers;
@@ -208,7 +213,7 @@ namespace
 		// ProcessReply), and the off-screen test window never is, so that rule is lifted for just these events.
 		const bool bOldInactiveInput = Slate.GetHandleDeviceInputWhenApplicationNotActive();
 		Slate.SetHandleDeviceInputWhenApplicationNotActive(true);
-		Slate.ProcessMouseMoveEvent(FPointerEvent(0, 0, At, At, NoButtons, EKeys::Invalid, 0.0f, NoModifiers));
+		Slate.ProcessMouseMoveEvent(FPointerEvent(0, 0, At, From, NoButtons, EKeys::Invalid, 0.0f, NoModifiers));
 		if (bClick)
 		{
 			Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(0, 0, At, At, LeftDown, EKeys::LeftMouseButton, 0.0f, NoModifiers));
@@ -290,7 +295,7 @@ namespace
 		}
 		const FVector2D First = Middle(Widget);
 		LogUnder(World, TEXT("before the move"), First);
-		SendMouse(First, false);
+		SendMouse(First - FVector2D(30.0, 20.0), First, false); // the approach, from a little up and to the left
 		Then(World, 0.3f, [Find = MoveTemp(Find), First](UWorld* W)
 		{
 			UWidget* Target = Find(W);
@@ -301,7 +306,7 @@ namespace
 			}
 			const FVector2D At = Middle(Target);
 			LogUnder(W, TEXT("before the click"), At);
-			SendMouse(At, true);
+			SendMouse(First, At, true); // follows the widget if the switch to mouse layout moved it
 			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] clicked %s at %s (moved onto it at %s; application active %d)"), *GetNameSafe(Target), *At.ToString(), *First.ToString(), FSlateApplication::Get().IsActive());
 		});
 	}
