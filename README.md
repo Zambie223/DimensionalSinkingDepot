@@ -11,6 +11,7 @@ A normal uploader stops taking items when the Dimensional Depot is full for that
 - **Optionally sinks what it can't keep up with.** This is on by default. Items arriving faster than the building can upload are sunk too, so the belt never backs up.
   - Turn it off in Mod Options if you'd rather the belt wait until the Depot is full.
 - **Leaves unsinkable items alone.** Items the AWESOME Sink won't take wait in the building, just like a normal uploader.
+- **Has the AWESOME Sink's coupon screen built in.** Its window has a second tab showing how many points you need for the next coupon on both tracks, and a button that prints your coupons. You don't need to go to an AWESOME Sink.
 
 ## Installation
 
@@ -49,6 +50,17 @@ Main menu or pause menu > Mods > Dimensional Sinking Depot:
 | Require power to sink (like an AWESOME Sink) | Off | Off: the built-in sink is free. On: it only sinks while it has power, and draws what an AWESOME Sink draws (30 MW) while sinking. Without power it still uploads and the overflow backs up. |
 
 In multiplayer the host's or dedicated server's setting is used.
+
+## The AWESOME Sink tab
+
+Open a Dimensional Sinking Depot and switch to the **FICSIT AWESOME Sink** tab at the top of its window. With a gamepad, use the bumpers.
+
+- **Standard Points and DNA Points until the next coupon**: the same two bars the AWESOME Sink shows.
+- **Printable Coupons** and a **Print Coupons** button. It prints every available coupon that fits into your inventory. If they don't all fit, the rest stay available for later, and nothing is lost.
+- You need to be within 30 m of the building to print.
+- Coupons are shared by everyone in the game, as at a real AWESOME Sink.
+
+Normal Dimensional Depot Uploaders don't get the tab.
 
 ## Console
 
@@ -111,6 +123,11 @@ to it.
 - This mod works together with mods that change the Depot's upload speed or stack limit.
 
 ## Status
+
+Version 0.3.0 adds the AWESOME Sink tab. On Satisfactory 1.2.5.1 it passed:
+- an automated in-game check: switching tabs with the mouse and with the gamepad bumpers, both point bars, printing every coupon, a nearly full inventory (part printed, the rest kept), a full one (nothing printed, nothing lost), and normal uploaders left without the tab
+- a hosted game and a Windows and a Linux dedicated server, each with a joined player who prints from the tab: refused 60 m away, every coupon 15 m away, and counted once
+- loading a save made with 0.2.0
 
 Version 0.2.0 adds a way to turn every Dimensional Sinking Depot back into a normal uploader before removing the mod,
 and to undo that. On Satisfactory 1.2.5.1 it passed:

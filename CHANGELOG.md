@@ -2,6 +2,11 @@
 
 Changes made after the first public release are listed here.
 
+## 0.3.0
+
+### Added
+- An AWESOME Sink tab in the Dimensional Sinking Depot's window: points until the next coupon on both tracks, the number of coupons ready to print, and a Print Coupons button that prints every coupon that fits into your inventory (the rest stay available). Printing needs you within 30 m of the building. Switch tabs with the mouse or the gamepad bumpers.
+
 ## 0.2.0
 
 ### Added
