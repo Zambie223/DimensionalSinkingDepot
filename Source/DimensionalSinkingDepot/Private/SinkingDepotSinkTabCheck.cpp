@@ -9,6 +9,7 @@
 
 #include "SinkingDepotConstants.h"
 #include "SinkingDepotLog.h"
+#include "SinkingDepotOverflow.h"
 #include "SinkingDepotReflection.h"
 #include "SinkingDepotSinkTab.h"
 
@@ -19,6 +20,8 @@
 #include "Components/Overlay.h"
 #include "Components/TextBlock.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "UObject/UObjectIterator.h"
 #include "FGPlayerController.h"
 #include "Framework/Application/SlateApplication.h"
 #include "InputCoreTypes.h"
@@ -489,6 +492,12 @@ namespace
 		Then(World, 1.0f, [](UWorld* W)
 		{
 			CheckTab(W, TEXT("2 clicking the second tab shows the AWESOME Sink tab"), 1);
+			if (AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(W))
+			{
+				const float Standard = Sink->GetProgressionTowardsNextCoupon(EResourceSinkTrack::RST_Default);
+				const float Dna = Sink->GetProgressionTowardsNextCoupon(EResourceSinkTrack::RST_Exploration);
+				Check(TEXT("2 both tracks have progress to show (see screenshot 2_sinktab)"), Standard > 0.2f && Dna > 0.2f, FString::Printf(TEXT("standard %.2f, DNA %.2f"), Standard, Dna));
+			}
 			Shot(TEXT("2_sinktab"));
 			Then(W, 1.0f, [](UWorld* W2)
 			{
@@ -568,6 +577,38 @@ namespace
 		return Buildable;
 	}
 
+	/**
+	 * Sinks items into both tracks, about 60 % of the way to the next coupon (never a whole coupon), so the panel's track
+	 * bars show progress and colour. The item per track is the one with the most points that still fits.
+	 */
+	void AddTrackProgress(AFGResourceSinkSubsystem* Sink)
+	{
+		for (const EResourceSinkTrack Track : {EResourceSinkTrack::RST_Default, EResourceSinkTrack::RST_Exploration})
+		{
+			const int64 Target = Sink->GetNumPointsToNextCoupon(Track) * 6 / 10;
+			UClass* Best = nullptr;
+			int32 BestPoints = 0;
+			for (TObjectIterator<UClass> It; It; ++It)
+			{
+				int32 Points = 0;
+				EResourceSinkTrack ItemTrack = EResourceSinkTrack::RST_Default;
+				if (It->IsChildOf(UFGItemDescriptor::StaticClass()) && !It->HasAnyClassFlags(CLASS_Abstract)
+					&& Sink->FindResourceSinkPointsForItem(*It, Points, ItemTrack) && ItemTrack == Track && Points > BestPoints && Points <= Target)
+				{
+					Best = *It;
+					BestPoints = Points;
+				}
+			}
+			const int32 Count = Best ? static_cast<int32>(FMath::Min<int64>(Target / BestPoints, 1000)) : 0;
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				Sink->AddPoints_ThreadSafe(Best);
+			}
+			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] track %d: sank %d x %s (%d points each) toward %lld points to the next coupon"),
+				static_cast<int32>(Track), Count, *GetNameSafe(Best), BestPoints, Sink->GetNumPointsToNextCoupon(Track));
+		}
+	}
+
 	void Start(UWorld* World)
 	{
 		APlayerController* Controller = World->GetFirstPlayerController();
@@ -585,11 +626,195 @@ namespace
 		const FVector Base = Pawn->GetActorLocation() - FVector(0, 0, 100.0f) + Forward * 1500.0f;
 		GOurs = Spawn(World, BuildClassPath, Base - Right * 600.0f, Yaw + 180.0f);
 		GVanilla = Spawn(World, VanillaUploaderClassPath, Base + Right * 600.0f, Yaw + 180.0f);
+		AddTrackProgress(Sink);
 		Sink->AddResourceSinkCoupons(CouponsGiven - Sink->GetNumCoupons(), false);
 		LogSinkingDepot.SetVerbosity(ELogVerbosity::Verbose);
 		Check(TEXT("0 setup"), GOurs.IsValid() && GVanilla.IsValid() && Sink->GetNumCoupons() == CouponsGiven,
 			FString::Printf(TEXT("ours %s, vanilla %s, coupons available %d"), *GetNameSafe(GOurs.Get()), *GetNameSafe(GVanilla.Get()), Sink->GetNumCoupons()));
 		Then(World, 3.0f, Step1Open);
+	}
+
+	// ---- Multiplayer: -SinkingDepotSinkTabServer (listen host or dedicated server) with -SinkingDepotSinkTabClient (a
+	// joined client). The server spawns two Sinking Depots for the first remote player, one 15 m away and one 60 m away
+	// (beyond the 30 m print range), and sets 7 coupons. The client prints through the real panel: at the far one it must
+	// be refused, at the near one it must get all 7, and both sides check the coupons were counted once.
+
+	constexpr float NetNear = 1500.0f;
+	constexpr float NetFar = 6000.0f;
+	TWeakObjectPtr<AFGCharacterPlayer> GNetPlayer;
+
+	int32 CouponsOf(UWorld* World, const AFGCharacterPlayer* Player)
+	{
+		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
+		return (Player && Player->GetInventory() && Sink && Sink->GetCouponClass()) ? Player->GetInventory()->GetNumItems(Sink->GetCouponClass()) : -1;
+	}
+
+	void NetServerWatch(UWorld* World, const int32 Polls)
+	{
+		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
+		const int32 Inventory = CouponsOf(World, GNetPlayer.Get());
+		if (Inventory <= 0 && Polls < 300)
+		{
+			Then(World, 2.0f, [Polls](UWorld* W) { NetServerWatch(W, Polls + 1); });
+			return;
+		}
+		// The client checks again 10 s after its print; so does the server, in case anything arrives twice.
+		Then(World, 12.0f, [](UWorld* W)
+		{
+			AFGResourceSinkSubsystem* Sink2 = AFGResourceSinkSubsystem::Get(W);
+			const int32 Now = CouponsOf(W, GNetPlayer.Get());
+			const int32 Left = Sink2 ? Sink2->GetNumCoupons() : -1;
+			Check(TEXT("S1 the client's print reached its inventory, counted once"), Now == CouponsGiven && Left == 0,
+				FString::Printf(TEXT("client inventory %d, still available %d (given %d)"), Now, Left, CouponsGiven));
+			Finish(W);
+		});
+		UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] server: the client's inventory has %d coupon(s), %d still available"), Inventory, Sink ? Sink->GetNumCoupons() : -1);
+	}
+
+	void NetServerSpawn(UWorld* World)
+	{
+		AFGCharacterPlayer* Player = GNetPlayer.Get();
+		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
+		if (!Player || !Sink)
+		{
+			Check(TEXT("S0 setup"), false, FString::Printf(TEXT("client player %d, sink subsystem %d"), Player != nullptr, Sink != nullptr));
+			Finish(World);
+			return;
+		}
+		const float Yaw = Player->GetActorRotation().Yaw;
+		const FVector Forward = FRotator(0.0f, Yaw, 0.0f).Vector();
+		const FVector Base = Player->GetActorLocation() - FVector(0, 0, 100.0f);
+		const AFGBuildable* Near = Spawn(World, BuildClassPath, Base + Forward * NetNear, Yaw + 180.0f);
+		const AFGBuildable* Far = Spawn(World, BuildClassPath, Base + Forward * NetFar, Yaw + 180.0f);
+		Sink->AddResourceSinkCoupons(CouponsGiven - Sink->GetNumCoupons(), false);
+		Check(TEXT("S0 setup"), Near && Far && Sink->GetNumCoupons() == CouponsGiven && CouponsOf(World, Player) == 0,
+			FString::Printf(TEXT("for %s: near %s, far %s, coupons available %d, in the client's inventory %d"), *GetNameSafe(Player), *GetNameSafe(Near), *GetNameSafe(Far),
+				Sink->GetNumCoupons(), CouponsOf(World, Player)));
+		NetServerWatch(World, 0);
+	}
+
+	void NetServerWaitForClient(UWorld* World, const int32 Polls)
+	{
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			APlayerController* Controller = It->Get();
+			if (Controller && !Controller->IsLocalController() && Cast<AFGCharacterPlayer>(Controller->GetPawn()))
+			{
+				GNetPlayer = Cast<AFGCharacterPlayer>(Controller->GetPawn());
+				UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] server: %s joined; spawning in 15 s"), *GetNameSafe(GNetPlayer.Get()));
+				Then(World, 15.0f, NetServerSpawn); // let the new player land first
+				return;
+			}
+		}
+		if (Polls < 300)
+		{
+			Then(World, 3.0f, [Polls](UWorld* W) { NetServerWaitForClient(W, Polls + 1); });
+			return;
+		}
+		Check(TEXT("S0 a client joined"), false, TEXT("none within 15 min"));
+		Finish(World);
+	}
+
+	TWeakObjectPtr<AFGBuildable> GNetNear;
+	TWeakObjectPtr<AFGBuildable> GNetFar;
+
+	/** Opens Building's panel on this client and shows the sink tab with a real click; Next runs 1.5 s after the click. */
+	void NetOpenSinkTab(UWorld* World, AFGBuildable* Building, const TCHAR* Which, TFunction<void(UWorld*)> Next)
+	{
+		GOurs = Building;
+		Open(World, Building);
+		Then(World, 3.0f, [Which, Next = MoveTemp(Next)](UWorld* W) mutable
+		{
+			UUserWidget* Window = WindowOf(OpenWidgetFor(W, GOurs.Get()));
+			Check(*FString::Printf(TEXT("C1 the %s building's panel has two tabs on a client"), Which), TabCount(Window) == 2, FString::Printf(TEXT("tabs %d"), TabCount(Window)));
+			ClickTab(W, 1);
+			Then(W, 1.5f, [Which, Next = MoveTemp(Next)](UWorld* W2)
+			{
+				CheckTab(W2, *FString::Printf(TEXT("C1 clicking the second tab shows the sink tab (%s building)"), Which), 1);
+				const UTextBlock* Coupons = Cast<UTextBlock>(PanelWidget(W2, TEXT("CouponsText")));
+				const FString Text = Coupons ? Coupons->GetText().ToString() : TEXT("(no coupons text)");
+				Check(*FString::Printf(TEXT("C1 the client sees the server's coupons (%s building)"), Which), Text.EndsWith(TEXT(" 7")), Text);
+				Next(W2);
+			});
+		});
+	}
+
+	void NetClientNear(UWorld* World)
+	{
+		NetOpenSinkTab(World, GNetNear.Get(), TEXT("near"), [](UWorld* W)
+		{
+			ClickPrint(W);
+			Then(W, 3.0f, [](UWorld* W2)
+			{
+				AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(W2);
+				Check(TEXT("C3 Print on a client puts all 7 coupons in its inventory"), CouponsInInventory(W2) == CouponsGiven && Sink && Sink->GetNumCoupons() == 0,
+					FString::Printf(TEXT("inventory %d, still available %d, status '%s'"), CouponsInInventory(W2), Sink ? Sink->GetNumCoupons() : -1, *StatusText(W2)));
+				Check(TEXT("C3 the client's status line reports the print"), StatusText(W2).Contains(TEXT("7 coupons")), StatusText(W2));
+				Shot(TEXT("client_printed"));
+				Then(W2, 10.0f, [](UWorld* W3)
+				{
+					AFGResourceSinkSubsystem* Sink3 = AFGResourceSinkSubsystem::Get(W3);
+					Check(TEXT("C4 10 s later still exactly 7 (counted once)"), CouponsInInventory(W3) == CouponsGiven && Sink3 && Sink3->GetNumCoupons() == 0,
+						FString::Printf(TEXT("inventory %d, still available %d"), CouponsInInventory(W3), Sink3 ? Sink3->GetNumCoupons() : -1));
+					Close(W3, GOurs.Get());
+					Finish(W3);
+				});
+			});
+		});
+	}
+
+	void NetClientFar(UWorld* World)
+	{
+		NetOpenSinkTab(World, GNetFar.Get(), TEXT("far"), [](UWorld* W)
+		{
+			ClickPrint(W);
+			Then(W, 3.0f, [](UWorld* W2)
+			{
+				AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(W2);
+				Check(TEXT("C2 Print at a building 60 m away is refused and prints nothing"),
+					CouponsInInventory(W2) == 0 && Sink && Sink->GetNumCoupons() == CouponsGiven && StatusText(W2).Contains(TEXT("refused")),
+					FString::Printf(TEXT("inventory %d, still available %d, status '%s'"), CouponsInInventory(W2), Sink ? Sink->GetNumCoupons() : -1, *StatusText(W2)));
+				Shot(TEXT("client_refused"));
+				Close(W2, GOurs.Get());
+				Then(W2, 2.0f, NetClientNear);
+			});
+		});
+	}
+
+	void NetClientWait(UWorld* World, const int32 Polls)
+	{
+		APlayerController* Controller = World->GetFirstPlayerController();
+		const APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
+		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
+		TArray<AFGBuildable*> Ours;
+		for (TActorIterator<AFGBuildable> It(World); It; ++It)
+		{
+			if (IsSinkingDepot(*It))
+			{
+				Ours.Add(*It);
+			}
+		}
+		if (!Pawn || !Sink || Ours.Num() < 2 || Sink->GetNumCoupons() != CouponsGiven)
+		{
+			if (Polls < 300)
+			{
+				Then(World, 3.0f, [Polls](UWorld* W) { NetClientWait(W, Polls + 1); });
+				return;
+			}
+			Check(TEXT("C0 setup"), false, FString::Printf(TEXT("pawn %d, sink %d, Sinking Depots %d, coupons %d"), Pawn != nullptr, Sink != nullptr, Ours.Num(), Sink ? Sink->GetNumCoupons() : -1));
+			Finish(World);
+			return;
+		}
+		Ours.Sort([Pawn](const AFGBuildable& A, const AFGBuildable& B) { return FVector::Dist(A.GetActorLocation(), Pawn->GetActorLocation()) < FVector::Dist(B.GetActorLocation(), Pawn->GetActorLocation()); });
+		GNetNear = Ours[0];
+		GNetFar = Ours.Last();
+		const double NearDist = FVector::Dist(Ours[0]->GetActorLocation(), Pawn->GetActorLocation());
+		const double FarDist = FVector::Dist(Ours.Last()->GetActorLocation(), Pawn->GetActorLocation());
+		LogSinkingDepot.SetVerbosity(ELogVerbosity::Verbose);
+		Check(TEXT("C0 setup"), NearDist < 3000.0 && FarDist > 3000.0 && CouponsInInventory(World) == 0,
+			FString::Printf(TEXT("near %s at %.0f, far %s at %.0f, coupons available %d, in the inventory %d"), *GetNameSafe(Ours[0]), NearDist, *GetNameSafe(Ours.Last()), FarDist,
+				Sink->GetNumCoupons(), CouponsInInventory(World)));
+		Then(World, 2.0f, NetClientFar);
 	}
 	// ---- Tab lab: tries the ways the frame might be made to draw and switch a second tab, logging the result of each.
 
@@ -770,6 +995,26 @@ void SinkingDepot::Dev::TabLab(UWorld* World)
 	SinkingDepot::SinkTabCheck::Then(World, 35.0f, [](UWorld* W) { SinkingDepot::SinkTabCheck::StartLab(W); });
 }
 
+void SinkingDepot::Dev::SinkTabNetServer(UWorld* World)
+{
+	if (!World || World->GetNetMode() == NM_Standalone || World->GetNetMode() == NM_Client)
+	{
+		return;
+	}
+	UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotSinkTabServer: waiting for a client"));
+	SinkingDepot::SinkTabCheck::NetServerWaitForClient(World, 0);
+}
+
+void SinkingDepot::Dev::SinkTabNetClient(UWorld* World)
+{
+	if (!World || World->GetNetMode() != NM_Client)
+	{
+		return;
+	}
+	UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotSinkTabClient: waiting for the server's Sinking Depots"));
+	SinkingDepot::SinkTabCheck::NetClientWait(World, 0);
+}
+
 void SinkingDepot::Dev::SinkTabCheck(UWorld* World)
 {
 	if (!World || World->GetNetMode() == NM_DedicatedServer)
@@ -781,6 +1026,14 @@ void SinkingDepot::Dev::SinkTabCheck(UWorld* World)
 }
 
 #else
+
+void SinkingDepot::Dev::SinkTabNetServer(UWorld* World)
+{
+}
+
+void SinkingDepot::Dev::SinkTabNetClient(UWorld* World)
+{
+}
 
 void SinkingDepot::Dev::SinkTabCheck(UWorld* World)
 {

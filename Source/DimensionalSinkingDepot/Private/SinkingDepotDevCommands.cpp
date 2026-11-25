@@ -2998,6 +2998,10 @@ void SinkingDepot::Dev::OnClientWorldReady(UWorld* World)
 	{
 		ConvertClientWorldReady(World);
 	}
+	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotSinkTabClient")))
+	{
+		SinkTabNetClient(World);
+	}
 	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotClientCheck")))
 	{
 		UE_LOG(LogSinkingDepot, Warning, TEXT("[dev] -SinkingDepotClientCheck: waiting for a Sinking Depot to replicate"));
@@ -3027,6 +3031,10 @@ void SinkingDepot::Dev::OnWorldReady(UWorld* World)
 		SinkTabCheck(World);
 	}
 
+	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotSinkTabServer")))
+	{
+		SinkTabNetServer(World);
+	}
 	if (World && FParse::Param(FCommandLine::Get(), TEXT("SinkingDepotTabLab")))
 	{
 		TabLab(World);

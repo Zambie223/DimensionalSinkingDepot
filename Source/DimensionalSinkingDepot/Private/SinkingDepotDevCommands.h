@@ -46,6 +46,15 @@ namespace SinkingDepot::Dev
 	 */
 	void SinkTabCheck(UWorld* World);
 
+	/**
+	 * Multiplayer AWESOME Sink tab check (SinkingDepotSinkTabCheck.cpp). -SinkingDepotSinkTabServer (listen host or
+	 * dedicated server) spawns two Sinking Depots near the first joined client, 15 m and 60 m away, and sets 7 coupons;
+	 * -SinkingDepotSinkTabClient (that client) prints through the real panel: refused at the far one, all 7 at the near
+	 * one. Both log "[sinktab] CHECK ..." and "[sinktab] RESULT n/m"; the client's last screenshot is sinktab_done.
+	 */
+	void SinkTabNetServer(UWorld* World);
+	void SinkTabNetClient(UWorld* World);
+
 	/** -SinkingDepotTabLab: diagnostic for the window frame's tabs; logs "[tablab] ..." lines, ending with "[tablab] done". */
 	void TabLab(UWorld* World);
 }
