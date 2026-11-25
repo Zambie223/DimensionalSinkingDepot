@@ -379,12 +379,31 @@ namespace
 		Check(Name, Showing == Expected && Highlighted == Expected, FString::Printf(TEXT("showing %d, highlighted %d, expected %d, gamepad %d"), Showing, Highlighted, Expected, UsingGamepad(World)));
 	}
 
+	/**
+	 * The coupon item. The sink subsystem's own pointer (mCouponClass) is transient and not replicated, so on a client it
+	 * is null; the asset is loaded by path there.
+	 */
+	UClass* CouponClass(UWorld* World)
+	{
+		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
+		if (Sink && Sink->GetCouponClass())
+		{
+			return Sink->GetCouponClass();
+		}
+		static TWeakObjectPtr<UClass> Loaded;
+		if (!Loaded.IsValid())
+		{
+			Loaded = LoadClass<UFGItemDescriptor>(nullptr, TEXT("/Game/FactoryGame/Resource/Parts/ResourceSinkCoupon/Desc_ResourceSinkCoupon.Desc_ResourceSinkCoupon_C"));
+		}
+		return Loaded.Get();
+	}
+
 	int32 CouponsInInventory(UWorld* World)
 	{
 		APlayerController* Controller = World->GetFirstPlayerController();
 		const AFGCharacterPlayer* Player = Controller ? Cast<AFGCharacterPlayer>(Controller->GetPawn()) : nullptr;
-		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
-		return (Player && Player->GetInventory() && Sink && Sink->GetCouponClass()) ? Player->GetInventory()->GetNumItems(Sink->GetCouponClass()) : -1;
+		UClass* Coupon = CouponClass(World);
+		return (Player && Player->GetInventory() && Coupon) ? Player->GetInventory()->GetNumItems(Coupon) : -1;
 	}
 
 	void Finish(UWorld* World)
@@ -606,6 +625,25 @@ namespace
 			}
 			UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] track %d: sank %d x %s (%d points each) toward %lld points to the next coupon"),
 				static_cast<int32>(Track), Count, *GetNameSafe(Best), BestPoints, Sink->GetNumPointsToNextCoupon(Track));
+			if (Count == 0)
+			{
+				// No item of this track is small enough (the DNA items are all worth more than this): add the points to the
+				// track's total directly (mTotalPoints, indexed by track). Test only; below the next coupon, so no coupon.
+				FArrayProperty* Totals = FindFProperty<FArrayProperty>(AFGResourceSinkSubsystem::StaticClass(), TEXT("mTotalPoints"));
+				const FInt64Property* Element = Totals ? CastField<FInt64Property>(Totals->Inner) : nullptr;
+				if (Element)
+				{
+					FScriptArrayHelper Array(Totals, Totals->ContainerPtrToValuePtr<void>(Sink));
+					const int32 TrackIndex = static_cast<int32>(Track);
+					if (Array.IsValidIndex(TrackIndex))
+					{
+						int64* Value = reinterpret_cast<int64*>(Array.GetRawPtr(TrackIndex));
+						*Value += Target;
+					}
+				}
+				UE_LOG(LogSinkingDepot, Log, TEXT("[sinktab] track %d: added %lld points to its total directly; now %lld to the next coupon"),
+					static_cast<int32>(Track), Element ? Target : 0, Sink->GetNumPointsToNextCoupon(Track));
+			}
 		}
 	}
 
@@ -645,8 +683,8 @@ namespace
 
 	int32 CouponsOf(UWorld* World, const AFGCharacterPlayer* Player)
 	{
-		AFGResourceSinkSubsystem* Sink = AFGResourceSinkSubsystem::Get(World);
-		return (Player && Player->GetInventory() && Sink && Sink->GetCouponClass()) ? Player->GetInventory()->GetNumItems(Sink->GetCouponClass()) : -1;
+		UClass* Coupon = CouponClass(World);
+		return (Player && Player->GetInventory() && Coupon) ? Player->GetInventory()->GetNumItems(Coupon) : -1;
 	}
 
 	void NetServerWatch(UWorld* World, const int32 Polls)
